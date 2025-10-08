@@ -7,7 +7,6 @@ const errorDiv = document.getElementById('error');
 const optimizeCheck = document.getElementById('optimizeCheck');
 
 const API_ENDPOINT = '/api/upload';
-const API_KEY = '';
 
 uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -77,9 +76,6 @@ async function uploadFile(file) {
     formData.append('optimize', optimizeCheck.checked);
 
     const headers = {};
-    if (API_KEY) {
-        headers['X-API-Key'] = API_KEY;
-    }
 
     const response = await fetch(API_ENDPOINT, {
         method: 'POST',

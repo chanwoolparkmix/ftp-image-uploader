@@ -13,6 +13,9 @@ const FTP_PATH = process.env.FTP_PATH || '/';
 const PUBLIC_URL = process.env.PUBLIC_URL;
 const API_KEY = process.env.API_KEY;
 
+const AUTH_USER = process.env.AUTH_USER;
+const AUTH_PASS = process.env.AUTH_PASS;
+
 const DEFAULT_MAX_DIMENSION = process.env.MAX_DIMENSION || '1200';
 const DEFAULT_QUALITY = process.env.IMAGE_QUALITY || '85';
 
@@ -35,9 +38,29 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  if (API_KEY && req.headers['x-api-key'] !== API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
+if (AUTH_USER && AUTH_PASS) {
+  const auth = req.headers.authorization;
+  
+  if (!auth) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+    return res.status(401).json({ error: 'Authentication required' });
   }
+  
+  const [scheme, credentials] = auth.split(' ');
+  
+  if (scheme !== 'Basic') {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+    return res.status(401).json({ error: 'Invalid authentication' });
+  }
+  
+  const decoded = Buffer.from(credentials, 'base64').toString();
+  const [username, password] = decoded.split(':');
+  
+  if (username !== AUTH_USER || password !== AUTH_PASS) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+}
 
   try {
     const { file, optimize } = await parseMultipartForm(req);
