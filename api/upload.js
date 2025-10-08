@@ -2,6 +2,7 @@ import ftp from 'basic-ftp';
 import Busboy from 'busboy';
 import sharp from 'sharp';
 import crypto from 'crypto';
+import { Readable } from 'stream'; // ✅ 스트림 모듈 import
 
 // 환경 변수
 const FTP_HOST = process.env.FTP_HOST;
@@ -12,7 +13,6 @@ const FTP_PATH = process.env.FTP_PATH || '/';
 const PUBLIC_URL = process.env.PUBLIC_URL;
 const API_KEY = process.env.API_KEY;
 
-// 기본 최적화 설정
 const DEFAULT_MAX_DIMENSION = process.env.MAX_DIMENSION || '1200';
 const DEFAULT_QUALITY = process.env.IMAGE_QUALITY || '85';
 
@@ -26,7 +26,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
-  
+
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -41,7 +41,7 @@ export default async function handler(req, res) {
 
   try {
     const { file, optimize } = await parseMultipartForm(req);
-    
+
     if (!file) {
       return res.status(400).json({ error: 'No file provided' });
     }
@@ -82,7 +82,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       url: publicUrl,
-      filename: filename,
+      filename,
       size: processedBuffer.length,
       optimized: optimize !== 'false',
       markdown: `![](${publicUrl})`
@@ -162,6 +162,15 @@ function generateSecureFilename(originalName) {
   return `img-${timestamp}-${random}.${ext}`;
 }
 
+// ✅ 버퍼를 ReadableStream으로 변환하는 함수
+function bufferToStream(buffer) {
+  const stream = new Readable();
+  stream.push(buffer);
+  stream.push(null);
+  return stream;
+}
+
+// ✅ 수정된 FTP 업로드 함수
 async function uploadToFTP(buffer, remotePath) {
   const client = new ftp.Client();
   client.ftp.verbose = false;
@@ -177,9 +186,11 @@ async function uploadToFTP(buffer, remotePath) {
 
     const dir = remotePath.substring(0, remotePath.lastIndexOf('/'));
     await client.ensureDir(dir);
-    await client.uploadFrom(Buffer.from(buffer), remotePath);
-    console.log(`📤 FTP: ${remotePath}`);
 
+    const stream = bufferToStream(buffer);
+    await client.uploadFrom(stream, remotePath);
+
+    console.log(`📤 FTP: ${remotePath}`);
   } finally {
     client.close();
   }
