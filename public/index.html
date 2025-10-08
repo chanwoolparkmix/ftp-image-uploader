@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🖼️ FTP 이미지 업로더</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🖼️ 이미지 업로더</h1>
+            <p>FTP 서버에 안전하게 이미지를 업로드하세요</p>
+        </div>
+        
+        <div class="upload-section">
+            <div class="upload-area" id="uploadArea">
+                <div class="upload-icon">📤</div>
+                <p class="upload-text">이미지를 여기에 드래그하거나 클릭하세요</p>
+                <p class="upload-hint">JPEG, PNG, GIF, WebP 지원 (최대 10MB)</p>
+                <input type="file" id="fileInput" accept="image/*" multiple style="display: none;">
+            </div>
+
+            <div class="options">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="optimizeCheck" checked>
+                    <span>이미지 자동 최적화 (1200px, 85% 품질)</span>
+                </label>
+            </div>
+        </div>
+
+        <div class="loading" id="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>업로드 중입니다...</p>
+        </div>
+
+        <div class="error" id="error" style="display: none;"></div>
+
+        <div class="results" id="results" style="display: none;">
+            <h3>✅ 업로드 완료</h3>
+            <div id="resultsList"></div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <p>🔒 모든 업로드는 암호화된 연결을 통해 안전하게 처리됩니다</p>
+    </footer>
+
+    <script src="/app.js"></script>
+</body>
+</html>
