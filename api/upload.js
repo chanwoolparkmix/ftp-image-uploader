@@ -21,66 +21,85 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-  // CORS 설정 - 특정 도메인만 허용
-  const origin = req.headers.origin;
-  if (origin === ALLOWED_ORIGIN) {
-    res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  }
-  
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  // Basic Auth 검증
-  if (AUTH_USER && AUTH_PASS) {
-    const authHeader = req.headers.authorization;
-    
-    if (!authHeader) {
-      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-    
-    try {
-      const [scheme, credentials] = authHeader.split(' ');
-      
-      if (scheme !== 'Basic') {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-        return res.status(401).json({ error: 'Invalid authentication scheme' });
-      }
-      
-      const decoded = Buffer.from(credentials, 'base64').toString('utf-8');
-      const colonIndex = decoded.indexOf(':');
-      
-      if (colonIndex === -1) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-        return res.status(401).json({ error: 'Invalid credentials format' });
-      }
-      
-      const username = decoded.substring(0, colonIndex);
-      const password = decoded.substring(colonIndex + 1);
-      
-      if (username !== AUTH_USER || password !== AUTH_PASS) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-        return res.status(401).json({ error: 'Invalid username or password' });
-      }
-      
-    } catch (error) {
-      console.error('[AUTH_ERROR]', error.message);
-      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-      return res.status(401).json({ error: 'Authentication failed' });
-    }
-  }
-
+  // 최상위 레벨 에러 핸들링
   try {
-    const file = await parseMultipartForm(req);
+    // CORS 설정 - 특정 도메인만 허용
+    const origin = req.headers.origin;
+    if (origin === ALLOWED_ORIGIN) {
+      res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+    
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // 필수 환경변수 체크
+    if (!FTP_HOST || !FTP_USER || !FTP_PASS || !PUBLIC_URL) {
+      console.error('[CONFIG_ERROR] Missing required environment variables');
+      return res.status(500).json({ 
+        error: 'Server configuration error',
+        errorCode: 'ERR_CONFIG'
+      });
+    }
+
+    // Basic Auth 검증
+    if (AUTH_USER && AUTH_PASS) {
+      const authHeader = req.headers.authorization;
+      
+      if (!authHeader) {
+        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+      
+      try {
+        const [scheme, credentials] = authHeader.split(' ');
+        
+        if (scheme !== 'Basic') {
+          res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+          return res.status(401).json({ error: 'Invalid authentication scheme' });
+        }
+        
+        const decoded = Buffer.from(credentials, 'base64').toString('utf-8');
+        const colonIndex = decoded.indexOf(':');
+        
+        if (colonIndex === -1) {
+          res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+          return res.status(401).json({ error: 'Invalid credentials format' });
+        }
+        
+        const username = decoded.substring(0, colonIndex);
+        const password = decoded.substring(colonIndex + 1);
+        
+        if (username !== AUTH_USER || password !== AUTH_PASS) {
+          res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+          return res.status(401).json({ error: 'Invalid username or password' });
+        }
+        
+      } catch (error) {
+        console.error('[AUTH_ERROR]', error.message);
+        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+        return res.status(401).json({ error: 'Authentication failed' });
+      }
+    }
+
+    let file;
+    try {
+      file = await parseMultipartForm(req);
+    } catch (parseError) {
+      console.error('[PARSE_ERROR]', parseError.message);
+      return res.status(400).json({ 
+        error: 'Failed to parse upload data',
+        errorCode: 'ERR_PARSE'
+      });
+    }
     
     if (!file) {
       return res.status(400).json({ error: 'No file provided', errorCode: 'ERR_NO_FILE' });
@@ -118,7 +137,15 @@ export default async function handler(req, res) {
     const remotePath = `${FTP_PATH}/${year}/${month}`;
     const fullPath = `${remotePath}/${filename}`;
 
-    await uploadToFTP(file.buffer, fullPath);
+    try {
+      await uploadToFTP(file.buffer, fullPath);
+    } catch (ftpError) {
+      console.error('[FTP_ERROR]', ftpError.message);
+      return res.status(500).json({ 
+        error: 'Failed to upload to storage server',
+        errorCode: 'ERR_FTP_UPLOAD'
+      });
+    }
 
     const publicUrl = `${PUBLIC_URL}/${year}/${month}/${filename}`;
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -134,7 +161,7 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('[UPLOAD_ERROR]', error.message, error.stack);
+    console.error('[HANDLER_ERROR]', error.message, error.stack);
     
     // 클라이언트에는 일반적인 메시지만 전송
     return res.status(500).json({ 
