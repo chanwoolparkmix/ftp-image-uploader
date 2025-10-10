@@ -1,3 +1,12 @@
+// 로그인 상태 관리
+let authCredentials = null;
+
+const loginContainer = document.getElementById('loginContainer');
+const mainContainer = document.getElementById('mainContainer');
+const loginForm = document.getElementById('loginForm');
+const loginError = document.getElementById('loginError');
+const logoutBtn = document.getElementById('logoutBtn');
+
 const uploadArea = document.getElementById('uploadArea');
 const fileInput = document.getElementById('fileInput');
 const loading = document.getElementById('loading');
@@ -13,8 +22,96 @@ const MAX_DIMENSION = 1200;
 const QUALITY = 0.85;
 
 // 메모리 안전 설정
-const MAX_CANVAS_SIZE = 4096; // 안전한 최대 캔버스 크기
+const MAX_CANVAS_SIZE = 4096;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+// 로그인 폼 제출
+loginForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    
+    loginError.style.display = 'none';
+    
+    try {
+        // 인증 정보 저장
+        authCredentials = btoa(`${username}:${password}`);
+        
+        // 간단한 인증 테스트 (OPTIONS 요청)
+        const testResponse = await fetch(API_ENDPOINT, {
+            method: 'OPTIONS',
+            headers: {
+                'Authorization': `Basic ${authCredentials}`
+            }
+        });
+        
+        // OPTIONS 요청은 항상 200을 반환하므로, 실제 POST로 검증
+        // 하지만 파일 없이는 400을 받으므로, 헤더만 보내서 401인지 확인
+        const verifyResponse = await fetch(API_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Basic ${authCredentials}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({}) // 빈 바디
+        });
+        
+        // 401이면 인증 실패
+        if (verifyResponse.status === 401) {
+            throw new Error('잘못된 사용자 이름 또는 비밀번호입니다.');
+        }
+        
+        // 400은 인증은 통과했지만 파일이 없다는 의미
+        if (verifyResponse.status === 400) {
+            console.log('[LOGIN_SUCCESS]');
+            localStorage.setItem('auth', authCredentials);
+            showMainApp();
+            return;
+        }
+        
+        // 기타 에러
+        throw new Error('로그인 중 오류가 발생했습니다.');
+        
+    } catch (error) {
+        console.error('[LOGIN_ERROR]', error.message);
+        authCredentials = null;
+        loginError.textContent = error.message || '로그인에 실패했습니다.';
+        loginError.style.display = 'block';
+    }
+});
+
+// 로그아웃
+logoutBtn.addEventListener('click', () => {
+    authCredentials = null;
+    localStorage.removeItem('auth');
+    showLoginScreen();
+});
+
+// 메인 앱 표시
+function showMainApp() {
+    loginContainer.style.display = 'none';
+    mainContainer.style.display = 'flex';
+}
+
+// 로그인 화면 표시
+function showLoginScreen() {
+    loginContainer.style.display = 'flex';
+    mainContainer.style.display = 'none';
+    loginForm.reset();
+    loginError.style.display = 'none';
+}
+
+// 페이지 로드 시 세션 확인
+window.addEventListener('load', () => {
+    const savedAuth = localStorage.getItem('auth');
+    if (savedAuth) {
+        authCredentials = savedAuth;
+        showMainApp();
+    } else {
+        showLoginScreen();
+    }
+});
 
 uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -47,48 +144,44 @@ async function handleFiles(files) {
         results.style.display = 'none';
     }
 
-    // 🔥 한 번에 하나씩 순차 처리 (메모리 보호)
     for (const file of files) {
         await processOneFile(file);
-        
-        // 각 파일 처리 후 약간의 대기 시간 (GC 시간 확보)
-        await sleep(100);
+        // GC가 메모리를 정리할 시간 제공 (특히 대용량 파일)
+        await sleep(300);
     }
 
     loading.style.display = 'none';
     fileInput.value = '';
 }
 
-// 파일 하나씩 처리
 async function processOneFile(file) {
     if (!file.type.startsWith('image/')) {
-        showError(`❌ "${file.name}"은(는) 이미지 파일이 아닙니다.`);
+        showError(`"${file.name}"은(는) 이미지 파일이 아닙니다.`);
         return;
     }
 
     if (file.size > MAX_FILE_SIZE) {
-        showError(`❌ "${file.name}"의 크기가 10MB를 초과합니다. (${formatFileSize(file.size)})`);
+        showError(`"${file.name}"의 크기가 10MB를 초과합니다. (${formatFileSize(file.size)})`);
         return;
     }
 
     try {
-        console.log(`📤 처리 시작: ${file.name} (${formatFileSize(file.size)})`);
+        console.log(`[PROCESS_START] ${file.name} (${formatFileSize(file.size)})`);
         
         let processedFile = file;
         let wasOptimized = false;
         
         if (optimizeCheck.checked) {
-            console.log(`🔧 최적화 중: ${file.name}`);
+            console.log(`[OPTIMIZE_START] ${file.name}`);
             
             try {
                 processedFile = await optimizeImageSafely(file);
                 wasOptimized = true;
                 
                 const reduction = ((1 - processedFile.size / file.size) * 100).toFixed(1);
-                console.log(`✅ 최적화 완료: ${formatFileSize(file.size)} → ${formatFileSize(processedFile.size)} (-${reduction}%)`);
+                console.log(`[OPTIMIZE_DONE] ${formatFileSize(file.size)} -> ${formatFileSize(processedFile.size)} (-${reduction}%)`);
             } catch (optimizeError) {
-                console.warn(`⚠️ 최적화 실패, 원본 업로드: ${optimizeError.message}`);
-                // 최적화 실패해도 원본으로 업로드 진행
+                console.warn(`[OPTIMIZE_FAILED] ${optimizeError.message}, using original`);
             }
         }
         
@@ -96,46 +189,47 @@ async function processOneFile(file) {
         addResult(result);
         
     } catch (error) {
-        console.error('Upload error:', error);
-        showError(`❌ "${file.name}" 업로드 실패: ${error.message}`);
+        console.error('[UPLOAD_ERROR]', error.message);
+        
+        // 401 에러면 로그아웃
+        if (error.message.includes('401') || error.message.includes('Authentication')) {
+            showError('인증이 만료되었습니다. 다시 로그인해주세요.');
+            setTimeout(() => {
+                authCredentials = null;
+                localStorage.removeItem('auth');
+                showLoginScreen();
+            }, 2000);
+        } else {
+            showError(`"${file.name}" 업로드 실패: ${error.message}`);
+        }
     }
 }
 
-// 메모리 안전 이미지 최적화
 async function optimizeImageSafely(file) {
-    return new Promise((resolve, reject) => {
-        // 1단계: createImageBitmap으로 메모리 효율적 디코딩
-        const useBitmap = 'createImageBitmap' in window;
-        
-        if (useBitmap) {
-            // 최신 브라우저 (Chrome, Edge, Firefox)
-            optimizeWithImageBitmap(file).then(resolve).catch(reject);
-        } else {
-            // 구형 브라우저 (Safari) - 폴백
-            optimizeWithImage(file).then(resolve).catch(reject);
-        }
-    });
+    const useBitmap = 'createImageBitmap' in window;
+    
+    if (useBitmap) {
+        return await optimizeWithImageBitmap(file);
+    } else {
+        return await optimizeWithImage(file);
+    }
 }
 
-// createImageBitmap 사용 (메모리 효율적)
 async function optimizeWithImageBitmap(file) {
     let bitmap = null;
     let canvas = null;
     let ctx = null;
     
     try {
-        // ImageBitmap 생성 (메모리 효율적)
         bitmap = await createImageBitmap(file);
         
         let width = bitmap.width;
         let height = bitmap.height;
         
-        // 원본이 너무 크면 거부
         if (width > MAX_CANVAS_SIZE * 2 || height > MAX_CANVAS_SIZE * 2) {
             throw new Error(`이미지가 너무 큽니다 (${width}×${height}px). 최대 ${MAX_CANVAS_SIZE * 2}px`);
         }
         
-        // 크기 조정 계산
         if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
             if (width > height) {
                 height = Math.round((height * MAX_DIMENSION) / width);
@@ -146,32 +240,36 @@ async function optimizeWithImageBitmap(file) {
             }
         }
         
-        // Canvas 생성
         canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
         ctx = canvas.getContext('2d', { 
-            alpha: false, // 알파 채널 비활성화로 메모리 절약
-            desynchronized: true // 성능 향상
+            alpha: false,
+            desynchronized: true
         });
         
-        // 배경을 흰색으로 (PNG 투명도 제거)
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
-        
-        // ImageBitmap 그리기
         ctx.drawImage(bitmap, 0, 0, width, height);
         
-        // Blob 변환
         const blob = await new Promise((resolve, reject) => {
-            canvas.toBlob(
-                (b) => b ? resolve(b) : reject(new Error('Blob 변환 실패')),
-                'image/jpeg',
-                QUALITY
-            );
+            try {
+                canvas.toBlob(
+                    (b) => {
+                        if (b) {
+                            resolve(b);
+                        } else {
+                            reject(new Error('Blob 변환 실패'));
+                        }
+                    },
+                    'image/jpeg',
+                    QUALITY
+                );
+            } catch (err) {
+                reject(err);
+            }
         });
         
-        // File 객체 생성
         const optimizedFile = new File([blob], file.name, {
             type: 'image/jpeg',
             lastModified: Date.now()
@@ -179,20 +277,34 @@ async function optimizeWithImageBitmap(file) {
         
         return optimizedFile;
         
+    } catch (error) {
+        throw error;
     } finally {
-        // 메모리 해제
-        if (bitmap) bitmap.close();
+        // 메모리 정리 강화
+        if (bitmap) {
+            try {
+                bitmap.close();
+            } catch (e) {
+                console.warn('[BITMAP_CLOSE_ERROR]', e);
+            }
+        }
         if (canvas) {
             canvas.width = 0;
             canvas.height = 0;
+            canvas = null;
+        }
+        if (ctx) {
+            ctx = null;
         }
         bitmap = null;
-        canvas = null;
-        ctx = null;
+        
+        // 명시적 GC 힌트 (일부 브라우저에서만 작동)
+        if (window.gc) {
+            window.gc();
+        }
     }
 }
 
-// Image 사용 (구형 브라우저 폴백)
 async function optimizeWithImage(file) {
     return new Promise((resolve, reject) => {
         const img = new Image();
@@ -203,12 +315,14 @@ async function optimizeWithImage(file) {
             if (canvas) {
                 canvas.width = 0;
                 canvas.height = 0;
+                canvas = null;
             }
             if (img.src) {
                 URL.revokeObjectURL(img.src);
             }
-            canvas = null;
-            ctx = null;
+            if (ctx) {
+                ctx = null;
+            }
             img.onload = null;
             img.onerror = null;
         };
@@ -280,14 +394,24 @@ async function uploadFile(file, originalName, wasOptimized) {
     const formData = new FormData();
     formData.append('file', file);
 
+    const headers = {};
+    if (authCredentials) {
+        headers['Authorization'] = `Basic ${authCredentials}`;
+    }
+
     const response = await fetch(API_ENDPOINT, {
         method: 'POST',
+        headers: headers,
         body: formData
     });
 
     if (!response.ok) {
+        if (response.status === 401) {
+            throw new Error('Authentication required (401)');
+        }
+        
         const error = await response.json();
-        throw new Error(error.error || error.details || 'Upload failed');
+        throw new Error(error.error || 'Upload failed');
     }
 
     const data = await response.json();
@@ -350,7 +474,7 @@ window.copyText = function(text, button, type) {
             button.classList.remove('copied');
         }, 2000);
     }).catch(err => {
-        console.error('복사 실패:', err);
+        console.error('[COPY_ERROR]', err);
         alert('복사에 실패했습니다.');
     });
 }
@@ -377,6 +501,6 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-console.log('🚀 FTP Image Uploader 준비 완료! (메모리 안전 모드)');
-console.log(`📐 최적화: 최대 ${MAX_DIMENSION}px, 품질 ${Math.round(QUALITY * 100)}%`);
-console.log(`🛡️ createImageBitmap 지원: ${('createImageBitmap' in window) ? '✅' : '❌ (폴백 모드)'}`);
+console.log('[APP_READY] FTP Image Uploader (Memory Safe Mode)');
+console.log(`[CONFIG] Max dimension: ${MAX_DIMENSION}px, Quality: ${Math.round(QUALITY * 100)}%`);
+console.log(`[FEATURE] createImageBitmap: ${('createImageBitmap' in window) ? 'Yes' : 'No (Fallback)'}`);
