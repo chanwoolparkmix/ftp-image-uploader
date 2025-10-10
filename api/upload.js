@@ -1,6 +1,7 @@
 import ftp from 'basic-ftp';
 import Busboy from 'busboy';
 import crypto from 'crypto';
+import { Readable } from 'stream';
 
 const FTP_HOST = process.env.FTP_HOST;
 const FTP_USER = process.env.FTP_USER;
@@ -11,8 +12,8 @@ const PUBLIC_URL = process.env.PUBLIC_URL;
 const AUTH_USER = process.env.AUTH_USER;
 const AUTH_PASS = process.env.AUTH_PASS;
 
-// 허용된 도메인 (환경변수로 설정 가능)
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://ftp-image-uploader.vercel.app';
+// 허용된 도메인
+const ALLOWED_ORIGIN = 'https://ftp-image-uploader.vercel.app';
 
 export const config = {
   api: {
@@ -21,91 +22,89 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-  // 최상위 레벨 에러 핸들링
+  // CORS 설정 - 엄격한 도메인 화이트리스트
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    ALLOWED_ORIGIN,
+    'http://localhost:3000',
+    'http://localhost:8000',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:8000'
+  ];
+  
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else if (!origin) {
+    // origin이 없는 경우 (Postman, curl 등 직접 요청)
+    // Basic Auth가 있으므로 허용
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else {
+    // 허용되지 않은 origin은 CORS 헤더를 설정하지 않음
+    // 브라우저가 요청을 차단함
+    console.warn('[CORS_BLOCKED]', origin);
+  }
+  
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  // 필수 환경변수 체크
+  if (!FTP_HOST || !FTP_USER || !FTP_PASS || !PUBLIC_URL) {
+    console.error('[CONFIG_ERROR] Missing: FTP_HOST, FTP_USER, FTP_PASS, or PUBLIC_URL');
+    return res.status(500).json({ 
+      error: 'Server configuration error',
+      errorCode: 'ERR_CONFIG'
+    });
+  }
+
+  // Basic Auth 검증
+  if (AUTH_USER && AUTH_PASS) {
+    const auth = req.headers.authorization;
+    
+    if (!auth) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    
+    const [scheme, credentials] = auth.split(' ');
+    
+    if (scheme !== 'Basic') {
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+      return res.status(401).json({ error: 'Invalid authentication' });
+    }
+    
+    const decoded = Buffer.from(credentials, 'base64').toString();
+    const colonIndex = decoded.indexOf(':');
+    
+    if (colonIndex === -1) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+      return res.status(401).json({ error: 'Invalid credentials format' });
+    }
+    
+    const username = decoded.substring(0, colonIndex);
+    const password = decoded.substring(colonIndex + 1);
+    
+    if (username !== AUTH_USER || password !== AUTH_PASS) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+  }
+
   try {
-    // CORS 설정 - 특정 도메인만 허용
-    const origin = req.headers.origin;
-    if (origin === ALLOWED_ORIGIN) {
-      res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
-    
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    
-    if (req.method === 'OPTIONS') {
-      return res.status(200).end();
-    }
+    const file = await parseMultipartForm(req);
 
-    if (req.method !== 'POST') {
-      return res.status(405).json({ error: 'Method not allowed' });
-    }
-
-    // 필수 환경변수 체크
-    if (!FTP_HOST || !FTP_USER || !FTP_PASS || !PUBLIC_URL) {
-      console.error('[CONFIG_ERROR] Missing required environment variables');
-      return res.status(500).json({ 
-        error: 'Server configuration error',
-        errorCode: 'ERR_CONFIG'
-      });
-    }
-
-    // Basic Auth 검증
-    if (AUTH_USER && AUTH_PASS) {
-      const authHeader = req.headers.authorization;
-      
-      if (!authHeader) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-        return res.status(401).json({ error: 'Authentication required' });
-      }
-      
-      try {
-        const [scheme, credentials] = authHeader.split(' ');
-        
-        if (scheme !== 'Basic') {
-          res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-          return res.status(401).json({ error: 'Invalid authentication scheme' });
-        }
-        
-        const decoded = Buffer.from(credentials, 'base64').toString('utf-8');
-        const colonIndex = decoded.indexOf(':');
-        
-        if (colonIndex === -1) {
-          res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-          return res.status(401).json({ error: 'Invalid credentials format' });
-        }
-        
-        const username = decoded.substring(0, colonIndex);
-        const password = decoded.substring(colonIndex + 1);
-        
-        if (username !== AUTH_USER || password !== AUTH_PASS) {
-          res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-          return res.status(401).json({ error: 'Invalid username or password' });
-        }
-        
-      } catch (error) {
-        console.error('[AUTH_ERROR]', error.message);
-        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
-        return res.status(401).json({ error: 'Authentication failed' });
-      }
-    }
-
-    let file;
-    try {
-      file = await parseMultipartForm(req);
-    } catch (parseError) {
-      console.error('[PARSE_ERROR]', parseError.message);
-      return res.status(400).json({ 
-        error: 'Failed to parse upload data',
-        errorCode: 'ERR_PARSE'
-      });
-    }
-    
     if (!file) {
       return res.status(400).json({ error: 'No file provided', errorCode: 'ERR_NO_FILE' });
     }
 
-    // MIME 타입 검증
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
     if (!allowedTypes.includes(file.mimetype)) {
       return res.status(400).json({ 
@@ -114,7 +113,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // 파일 시그니처 검증 (매직 넘버)
+    // 파일 시그니처 검증
     if (!isValidImageSignature(file.buffer, file.mimetype)) {
       return res.status(400).json({ 
         error: 'File signature does not match file type',
@@ -122,14 +121,14 @@ export default async function handler(req, res) {
       });
     }
 
-    // 5MB 제한
-    if (file.buffer.length > 5 * 1024 * 1024) {
+    if (file.buffer.length > 10 * 1024 * 1024) {
       return res.status(400).json({ 
-        error: 'File too large (max 5MB after optimization)',
+        error: 'File too large (max 10MB)',
         errorCode: 'ERR_FILE_TOO_LARGE'
       });
     }
 
+    // 파일명 생성 (옛날 방식 사용 - UUID 대신 짧은 랜덤값)
     const filename = generateSecureFilename(file.filename);
     const date = new Date();
     const year = date.getFullYear();
@@ -137,15 +136,8 @@ export default async function handler(req, res) {
     const remotePath = `${FTP_PATH}/${year}/${month}`;
     const fullPath = `${remotePath}/${filename}`;
 
-    try {
-      await uploadToFTP(file.buffer, fullPath);
-    } catch (ftpError) {
-      console.error('[FTP_ERROR]', ftpError.message);
-      return res.status(500).json({ 
-        error: 'Failed to upload to storage server',
-        errorCode: 'ERR_FTP_UPLOAD'
-      });
-    }
+    // FTP 업로드 (옛날 방식 - Stream 사용)
+    await uploadToFTP(file.buffer, fullPath);
 
     const publicUrl = `${PUBLIC_URL}/${year}/${month}/${filename}`;
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -161,11 +153,12 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('[HANDLER_ERROR]', error.message, error.stack);
+    console.error('[UPLOAD_ERROR]', error.message);
+    console.error('[UPLOAD_ERROR_STACK]', error.stack);
     
-    // 클라이언트에는 일반적인 메시지만 전송
     return res.status(500).json({ 
-      error: 'Upload failed. Please try again.',
+      error: 'Upload failed',
+      details: error.message, // 디버깅용
       errorCode: 'ERR_UPLOAD_FAILED'
     });
   }
@@ -178,11 +171,7 @@ function parseMultipartForm(req) {
 
     busboy.on('file', (fieldname, file, info) => {
       const chunks = [];
-      
-      file.on('data', (chunk) => {
-        chunks.push(chunk);
-      });
-      
+      file.on('data', (chunk) => chunks.push(chunk));
       file.on('end', () => {
         fileData = {
           buffer: Buffer.concat(chunks),
@@ -190,30 +179,21 @@ function parseMultipartForm(req) {
           mimetype: info.mimeType
         };
       });
-      
-      file.on('error', (error) => {
-        reject(error);
-      });
+      file.on('error', reject);
     });
 
-    busboy.on('finish', () => {
-      resolve(fileData);
-    });
-
-    busboy.on('error', (error) => {
-      reject(error);
-    });
-
+    busboy.on('finish', () => resolve(fileData));
+    busboy.on('error', reject);
     req.pipe(busboy);
   });
 }
 
+// 파일명 생성 (옛날 방식 - 짧고 안전)
 function generateSecureFilename(originalName) {
   const ext = originalName.split('.').pop().toLowerCase();
-  // UUID v4 형식 사용 (충돌 가능성 극히 낮음)
-  const uuid = crypto.randomUUID();
+  const random = crypto.randomBytes(8).toString('hex');
   const timestamp = Date.now();
-  return `img-${timestamp}-${uuid}.${ext}`;
+  return `img-${timestamp}-${random}.${ext}`;
 }
 
 // 파일 시그니처 검증 (매직 넘버)
@@ -224,7 +204,7 @@ function isValidImageSignature(buffer, mimetype) {
     'image/jpeg': [[0xFF, 0xD8, 0xFF]],
     'image/png': [[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]],
     'image/gif': [[0x47, 0x49, 0x46, 0x38, 0x37, 0x61], [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]],
-    'image/webp': [[0x52, 0x49, 0x46, 0x46]] // RIFF
+    'image/webp': [[0x52, 0x49, 0x46, 0x46]]
   };
 
   const expectedSigs = signatures[mimetype];
@@ -235,29 +215,51 @@ function isValidImageSignature(buffer, mimetype) {
   });
 }
 
+// Buffer를 Stream으로 변환
+function bufferToStream(buffer) {
+  const stream = new Readable();
+  stream.push(buffer);
+  stream.push(null);
+  return stream;
+}
+
+// FTP 업로드 (옛날 방식 복원)
 async function uploadToFTP(buffer, remotePath) {
   const client = new ftp.Client();
   client.ftp.verbose = false;
 
   try {
+    console.log('[FTP_CONNECT_START]', { host: FTP_HOST, port: FTP_PORT });
+
     await client.access({
       host: FTP_HOST,
       user: FTP_USER,
       password: FTP_PASS,
       port: parseInt(FTP_PORT),
       secure: false,
-      timeout: 30000 // 30초 타임아웃
+      timeout: 30000
     });
+
+    console.log('[FTP_CONNECTED]');
 
     const dir = remotePath.substring(0, remotePath.lastIndexOf('/'));
     await client.ensureDir(dir);
-    await client.uploadFrom(Buffer.from(buffer), remotePath);
     
-    console.log(`[FTP_UPLOAD] ${remotePath}`);
+    console.log('[FTP_DIR_READY]', dir);
+
+    // 핵심: Buffer를 Stream으로 변환해서 업로드
+    const stream = bufferToStream(buffer);
+    await client.uploadFrom(stream, remotePath);
+
+    console.log('[FTP_UPLOAD_SUCCESS]', remotePath);
 
   } catch (error) {
-    console.error('[FTP_ERROR]', error.message);
-    throw new Error('FTP_UPLOAD_FAILED');
+    console.error('[FTP_ERROR]', {
+      message: error.message,
+      code: error.code,
+      host: FTP_HOST
+    });
+    throw error;
   } finally {
     client.close();
   }
