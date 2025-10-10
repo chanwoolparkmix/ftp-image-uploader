@@ -18,7 +18,9 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // CORS 설정
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
@@ -32,26 +34,47 @@ export default async function handler(req, res) {
 
   // Basic Auth 검증
   if (AUTH_USER && AUTH_PASS) {
-    const auth = req.headers.authorization;
+    const authHeader = req.headers.authorization;
     
-    if (!auth) {
-      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+    console.log('Auth Header:', authHeader ? 'Present' : 'Missing');
+    
+    if (!authHeader) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
       return res.status(401).json({ error: 'Authentication required' });
     }
     
-    const [scheme, credentials] = auth.split(' ');
-    
-    if (scheme !== 'Basic') {
-      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
-      return res.status(401).json({ error: 'Invalid authentication' });
-    }
-    
-    const decoded = Buffer.from(credentials, 'base64').toString();
-    const [username, password] = decoded.split(':');
-    
-    if (username !== AUTH_USER || password !== AUTH_PASS) {
-      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
-      return res.status(401).json({ error: 'Invalid credentials' });
+    try {
+      const [scheme, credentials] = authHeader.split(' ');
+      
+      if (scheme !== 'Basic') {
+        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+        return res.status(401).json({ error: 'Invalid authentication scheme' });
+      }
+      
+      const decoded = Buffer.from(credentials, 'base64').toString('utf-8');
+      const colonIndex = decoded.indexOf(':');
+      
+      if (colonIndex === -1) {
+        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+        return res.status(401).json({ error: 'Invalid credentials format' });
+      }
+      
+      const username = decoded.substring(0, colonIndex);
+      const password = decoded.substring(colonIndex + 1);
+      
+      console.log('Username:', username, 'Expected:', AUTH_USER);
+      
+      if (username !== AUTH_USER || password !== AUTH_PASS) {
+        res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+        return res.status(401).json({ error: 'Invalid username or password' });
+      }
+      
+      console.log('✅ Authentication successful');
+      
+    } catch (error) {
+      console.error('Auth error:', error);
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader", charset="UTF-8"');
+      return res.status(401).json({ error: 'Authentication failed' });
     }
   }
 
@@ -64,9 +87,10 @@ export default async function handler(req, res) {
 
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
     if (!allowedTypes.includes(file.mimetype)) {
-      return res.status(400).json({ error: 'Invalid file type' });
+      return res.status(400).json({ error: 'Invalid file type. Allowed: JPEG, PNG, GIF, WebP' });
     }
 
+    // 5MB 제한 (브라우저에서 최적화된 이미지)
     if (file.buffer.length > 5 * 1024 * 1024) {
       return res.status(400).json({ error: 'File too large (max 5MB after optimization)' });
     }
@@ -82,7 +106,8 @@ export default async function handler(req, res) {
 
     const publicUrl = `${PUBLIC_URL}/${year}/${month}/${filename}`;
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    console.log(`✅ Upload: ${filename} (${Math.round(file.buffer.length / 1024)}KB) from ${ip}`);
+    const sizeKB = Math.round(file.buffer.length / 1024);
+    console.log(`✅ Upload: ${filename} (${sizeKB}KB) from ${ip}`);
 
     return res.status(200).json({
       success: true,
@@ -93,8 +118,11 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('❌ Error:', error);
-    return res.status(500).json({ error: 'Upload failed', details: error.message });
+    console.error('❌ Upload error:', error);
+    return res.status(500).json({ 
+      error: 'Upload failed', 
+      details: error.message 
+    });
   }
 }
 
@@ -105,7 +133,11 @@ function parseMultipartForm(req) {
 
     busboy.on('file', (fieldname, file, info) => {
       const chunks = [];
-      file.on('data', (chunk) => chunks.push(chunk));
+      
+      file.on('data', (chunk) => {
+        chunks.push(chunk);
+      });
+      
       file.on('end', () => {
         fileData = {
           buffer: Buffer.concat(chunks),
@@ -113,13 +145,20 @@ function parseMultipartForm(req) {
           mimetype: info.mimeType
         };
       });
+      
+      file.on('error', (error) => {
+        reject(error);
+      });
     });
 
     busboy.on('finish', () => {
       resolve(fileData);
     });
 
-    busboy.on('error', reject);
+    busboy.on('error', (error) => {
+      reject(error);
+    });
+
     req.pipe(busboy);
   });
 }
@@ -147,8 +186,12 @@ async function uploadToFTP(buffer, remotePath) {
     const dir = remotePath.substring(0, remotePath.lastIndexOf('/'));
     await client.ensureDir(dir);
     await client.uploadFrom(Buffer.from(buffer), remotePath);
-    console.log(`📤 FTP: ${remotePath}`);
+    
+    console.log(`📤 FTP upload: ${remotePath}`);
 
+  } catch (error) {
+    console.error('FTP error:', error);
+    throw new Error(`FTP upload failed: ${error.message}`);
   } finally {
     client.close();
   }
