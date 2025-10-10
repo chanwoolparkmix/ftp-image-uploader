@@ -1,23 +1,15 @@
 import ftp from 'basic-ftp';
 import Busboy from 'busboy';
-import sharp from 'sharp';
 import crypto from 'crypto';
-import { Readable } from 'stream'; // ✅ 스트림 모듈 import
 
-// 환경 변수
 const FTP_HOST = process.env.FTP_HOST;
 const FTP_USER = process.env.FTP_USER;
 const FTP_PASS = process.env.FTP_PASS;
 const FTP_PORT = process.env.FTP_PORT || '21';
 const FTP_PATH = process.env.FTP_PATH || '/';
 const PUBLIC_URL = process.env.PUBLIC_URL;
-const API_KEY = process.env.API_KEY;
-
 const AUTH_USER = process.env.AUTH_USER;
 const AUTH_PASS = process.env.AUTH_PASS;
-
-const DEFAULT_MAX_DIMENSION = process.env.MAX_DIMENSION || '1200';
-const DEFAULT_QUALITY = process.env.IMAGE_QUALITY || '85';
 
 export const config = {
   api: {
@@ -28,8 +20,8 @@ export const config = {
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
-
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
@@ -38,33 +30,34 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-if (AUTH_USER && AUTH_PASS) {
-  const auth = req.headers.authorization;
-  
-  if (!auth) {
-    res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
-    return res.status(401).json({ error: 'Authentication required' });
+  // Basic Auth 검증
+  if (AUTH_USER && AUTH_PASS) {
+    const auth = req.headers.authorization;
+    
+    if (!auth) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    
+    const [scheme, credentials] = auth.split(' ');
+    
+    if (scheme !== 'Basic') {
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+      return res.status(401).json({ error: 'Invalid authentication' });
+    }
+    
+    const decoded = Buffer.from(credentials, 'base64').toString();
+    const [username, password] = decoded.split(':');
+    
+    if (username !== AUTH_USER || password !== AUTH_PASS) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
   }
-  
-  const [scheme, credentials] = auth.split(' ');
-  
-  if (scheme !== 'Basic') {
-    res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
-    return res.status(401).json({ error: 'Invalid authentication' });
-  }
-  
-  const decoded = Buffer.from(credentials, 'base64').toString();
-  const [username, password] = decoded.split(':');
-  
-  if (username !== AUTH_USER || password !== AUTH_PASS) {
-    res.setHeader('WWW-Authenticate', 'Basic realm="Image Uploader"');
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-}
 
   try {
-    const { file, optimize } = await parseMultipartForm(req);
-
+    const file = await parseMultipartForm(req);
+    
     if (!file) {
       return res.status(400).json({ error: 'No file provided' });
     }
@@ -74,19 +67,8 @@ if (AUTH_USER && AUTH_PASS) {
       return res.status(400).json({ error: 'Invalid file type' });
     }
 
-    if (file.buffer.length > 10 * 1024 * 1024) {
-      return res.status(400).json({ error: 'File too large (max 10MB)' });
-    }
-
-    let processedBuffer = file.buffer;
-    if (optimize !== 'false') {
-      try {
-        const maxDim = parseInt(DEFAULT_MAX_DIMENSION);
-        const qual = parseInt(DEFAULT_QUALITY);
-        processedBuffer = await optimizeImage(file.buffer, file.mimetype, maxDim, qual);
-      } catch (error) {
-        console.error('Optimization failed:', error);
-      }
+    if (file.buffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ error: 'File too large (max 5MB after optimization)' });
     }
 
     const filename = generateSecureFilename(file.filename);
@@ -96,18 +78,17 @@ if (AUTH_USER && AUTH_PASS) {
     const remotePath = `${FTP_PATH}/${year}/${month}`;
     const fullPath = `${remotePath}/${filename}`;
 
-    await uploadToFTP(processedBuffer, fullPath);
+    await uploadToFTP(file.buffer, fullPath);
 
     const publicUrl = `${PUBLIC_URL}/${year}/${month}/${filename}`;
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    console.log(`✅ Upload: ${filename} from ${ip}`);
+    console.log(`✅ Upload: ${filename} (${Math.round(file.buffer.length / 1024)}KB) from ${ip}`);
 
     return res.status(200).json({
       success: true,
       url: publicUrl,
-      filename,
-      size: processedBuffer.length,
-      optimized: optimize !== 'false',
+      filename: filename,
+      size: file.buffer.length,
       markdown: `![](${publicUrl})`
     });
 
@@ -121,7 +102,6 @@ function parseMultipartForm(req) {
   return new Promise((resolve, reject) => {
     const busboy = Busboy({ headers: req.headers });
     let fileData = null;
-    let optimize = 'true';
 
     busboy.on('file', (fieldname, file, info) => {
       const chunks = [];
@@ -135,47 +115,13 @@ function parseMultipartForm(req) {
       });
     });
 
-    busboy.on('field', (fieldname, val) => {
-      if (fieldname === 'optimize') optimize = val;
-    });
-
     busboy.on('finish', () => {
-      resolve({ file: fileData, optimize });
+      resolve(fileData);
     });
 
     busboy.on('error', reject);
     req.pipe(busboy);
   });
-}
-
-async function optimizeImage(buffer, mimetype, maxDimension, quality) {
-  const image = sharp(buffer);
-  const metadata = await image.metadata();
-  let optimized = image;
-
-  if (metadata.width > maxDimension || metadata.height > maxDimension) {
-    optimized = optimized.resize(maxDimension, maxDimension, {
-      fit: 'inside',
-      withoutEnlargement: true
-    });
-  }
-
-  switch (mimetype) {
-    case 'image/jpeg':
-      optimized = optimized.jpeg({ quality: quality, mozjpeg: true });
-      break;
-    case 'image/png':
-      const pngCompression = Math.round(9 - (quality / 100) * 9);
-      optimized = optimized.png({ compressionLevel: pngCompression });
-      break;
-    case 'image/webp':
-      optimized = optimized.webp({ quality: quality });
-      break;
-    case 'image/gif':
-      return buffer;
-  }
-
-  return optimized.toBuffer();
 }
 
 function generateSecureFilename(originalName) {
@@ -185,15 +131,6 @@ function generateSecureFilename(originalName) {
   return `img-${timestamp}-${random}.${ext}`;
 }
 
-// ✅ 버퍼를 ReadableStream으로 변환하는 함수
-function bufferToStream(buffer) {
-  const stream = new Readable();
-  stream.push(buffer);
-  stream.push(null);
-  return stream;
-}
-
-// ✅ 수정된 FTP 업로드 함수
 async function uploadToFTP(buffer, remotePath) {
   const client = new ftp.Client();
   client.ftp.verbose = false;
@@ -209,11 +146,9 @@ async function uploadToFTP(buffer, remotePath) {
 
     const dir = remotePath.substring(0, remotePath.lastIndexOf('/'));
     await client.ensureDir(dir);
-
-    const stream = bufferToStream(buffer);
-    await client.uploadFrom(stream, remotePath);
-
+    await client.uploadFrom(Buffer.from(buffer), remotePath);
     console.log(`📤 FTP: ${remotePath}`);
+
   } finally {
     client.close();
   }
