@@ -12,6 +12,10 @@ const API_ENDPOINT = '/api/upload';
 const MAX_DIMENSION = 1200;
 const QUALITY = 0.85;
 
+// 메모리 안전 설정
+const MAX_CANVAS_SIZE = 4096; // 안전한 최대 캔버스 크기
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
 uploadArea.addEventListener('click', () => fileInput.click());
 
 uploadArea.addEventListener('dragover', (e) => {
@@ -39,70 +43,187 @@ async function handleFiles(files) {
     errorDiv.style.display = 'none';
     loading.style.display = 'block';
     
-    // 기존 결과 유지 (누적 표시)
     if (resultsList.children.length === 0) {
         results.style.display = 'none';
     }
 
-    const uploadResults = [];
-
+    // 🔥 한 번에 하나씩 순차 처리 (메모리 보호)
     for (const file of files) {
-        if (!file.type.startsWith('image/')) {
-            showError(`❌ "${file.name}"은(는) 이미지 파일이 아닙니다.`);
-            continue;
-        }
-
-        if (file.size > 10 * 1024 * 1024) {
-            showError(`❌ "${file.name}"의 크기가 10MB를 초과합니다. (${formatFileSize(file.size)})`);
-            continue;
-        }
-
-        try {
-            console.log(`📤 업로드 시작: ${file.name}`);
-            
-            // Canvas API로 이미지 최적화
-            let processedFile = file;
-            let wasOptimized = false;
-            
-            if (optimizeCheck.checked) {
-                console.log(`🔧 최적화 중: ${file.name}`);
-                processedFile = await optimizeImage(file);
-                wasOptimized = true;
-                console.log(`✅ 최적화 완료: ${formatFileSize(file.size)} → ${formatFileSize(processedFile.size)}`);
-            }
-            
-            const result = await uploadFile(processedFile, file.name, wasOptimized);
-            uploadResults.push(result);
-            
-        } catch (error) {
-            console.error('Upload error:', error);
-            showError(`❌ "${file.name}" 업로드 실패: ${error.message}`);
-        }
+        await processOneFile(file);
+        
+        // 각 파일 처리 후 약간의 대기 시간 (GC 시간 확보)
+        await sleep(100);
     }
 
     loading.style.display = 'none';
-
-    if (uploadResults.length > 0) {
-        results.style.display = 'block';
-        uploadResults.forEach(result => addResult(result));
-    }
-
     fileInput.value = '';
 }
 
-// Canvas API를 사용한 이미지 최적화
-async function optimizeImage(file) {
+// 파일 하나씩 처리
+async function processOneFile(file) {
+    if (!file.type.startsWith('image/')) {
+        showError(`❌ "${file.name}"은(는) 이미지 파일이 아닙니다.`);
+        return;
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+        showError(`❌ "${file.name}"의 크기가 10MB를 초과합니다. (${formatFileSize(file.size)})`);
+        return;
+    }
+
+    try {
+        console.log(`📤 처리 시작: ${file.name} (${formatFileSize(file.size)})`);
+        
+        let processedFile = file;
+        let wasOptimized = false;
+        
+        if (optimizeCheck.checked) {
+            console.log(`🔧 최적화 중: ${file.name}`);
+            
+            try {
+                processedFile = await optimizeImageSafely(file);
+                wasOptimized = true;
+                
+                const reduction = ((1 - processedFile.size / file.size) * 100).toFixed(1);
+                console.log(`✅ 최적화 완료: ${formatFileSize(file.size)} → ${formatFileSize(processedFile.size)} (-${reduction}%)`);
+            } catch (optimizeError) {
+                console.warn(`⚠️ 최적화 실패, 원본 업로드: ${optimizeError.message}`);
+                // 최적화 실패해도 원본으로 업로드 진행
+            }
+        }
+        
+        const result = await uploadFile(processedFile, file.name, wasOptimized);
+        addResult(result);
+        
+    } catch (error) {
+        console.error('Upload error:', error);
+        showError(`❌ "${file.name}" 업로드 실패: ${error.message}`);
+    }
+}
+
+// 메모리 안전 이미지 최적화
+async function optimizeImageSafely(file) {
+    return new Promise((resolve, reject) => {
+        // 1단계: createImageBitmap으로 메모리 효율적 디코딩
+        const useBitmap = 'createImageBitmap' in window;
+        
+        if (useBitmap) {
+            // 최신 브라우저 (Chrome, Edge, Firefox)
+            optimizeWithImageBitmap(file).then(resolve).catch(reject);
+        } else {
+            // 구형 브라우저 (Safari) - 폴백
+            optimizeWithImage(file).then(resolve).catch(reject);
+        }
+    });
+}
+
+// createImageBitmap 사용 (메모리 효율적)
+async function optimizeWithImageBitmap(file) {
+    let bitmap = null;
+    let canvas = null;
+    let ctx = null;
+    
+    try {
+        // ImageBitmap 생성 (메모리 효율적)
+        bitmap = await createImageBitmap(file);
+        
+        let width = bitmap.width;
+        let height = bitmap.height;
+        
+        // 원본이 너무 크면 거부
+        if (width > MAX_CANVAS_SIZE * 2 || height > MAX_CANVAS_SIZE * 2) {
+            throw new Error(`이미지가 너무 큽니다 (${width}×${height}px). 최대 ${MAX_CANVAS_SIZE * 2}px`);
+        }
+        
+        // 크기 조정 계산
+        if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+            if (width > height) {
+                height = Math.round((height * MAX_DIMENSION) / width);
+                width = MAX_DIMENSION;
+            } else {
+                width = Math.round((width * MAX_DIMENSION) / height);
+                height = MAX_DIMENSION;
+            }
+        }
+        
+        // Canvas 생성
+        canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        ctx = canvas.getContext('2d', { 
+            alpha: false, // 알파 채널 비활성화로 메모리 절약
+            desynchronized: true // 성능 향상
+        });
+        
+        // 배경을 흰색으로 (PNG 투명도 제거)
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
+        
+        // ImageBitmap 그리기
+        ctx.drawImage(bitmap, 0, 0, width, height);
+        
+        // Blob 변환
+        const blob = await new Promise((resolve, reject) => {
+            canvas.toBlob(
+                (b) => b ? resolve(b) : reject(new Error('Blob 변환 실패')),
+                'image/jpeg',
+                QUALITY
+            );
+        });
+        
+        // File 객체 생성
+        const optimizedFile = new File([blob], file.name, {
+            type: 'image/jpeg',
+            lastModified: Date.now()
+        });
+        
+        return optimizedFile;
+        
+    } finally {
+        // 메모리 해제
+        if (bitmap) bitmap.close();
+        if (canvas) {
+            canvas.width = 0;
+            canvas.height = 0;
+        }
+        bitmap = null;
+        canvas = null;
+        ctx = null;
+    }
+}
+
+// Image 사용 (구형 브라우저 폴백)
+async function optimizeWithImage(file) {
     return new Promise((resolve, reject) => {
         const img = new Image();
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
+        let canvas = null;
+        let ctx = null;
+        
+        const cleanup = () => {
+            if (canvas) {
+                canvas.width = 0;
+                canvas.height = 0;
+            }
+            if (img.src) {
+                URL.revokeObjectURL(img.src);
+            }
+            canvas = null;
+            ctx = null;
+            img.onload = null;
+            img.onerror = null;
+        };
         
         img.onload = () => {
             try {
                 let width = img.width;
                 let height = img.height;
                 
-                // 크기 조정 계산
+                if (width > MAX_CANVAS_SIZE * 2 || height > MAX_CANVAS_SIZE * 2) {
+                    cleanup();
+                    reject(new Error(`이미지가 너무 큽니다 (${width}×${height}px)`));
+                    return;
+                }
+                
                 if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
                     if (width > height) {
                         height = Math.round((height * MAX_DIMENSION) / width);
@@ -113,45 +234,44 @@ async function optimizeImage(file) {
                     }
                 }
                 
-                // Canvas 크기 설정
+                canvas = document.createElement('canvas');
                 canvas.width = width;
                 canvas.height = height;
+                ctx = canvas.getContext('2d', { alpha: false });
                 
-                // 이미지 그리기
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, width, height);
                 ctx.drawImage(img, 0, 0, width, height);
                 
-                // Blob으로 변환
                 canvas.toBlob(
                     (blob) => {
                         if (blob) {
-                            // File 객체로 변환
-                            const optimizedFile = new File(
-                                [blob], 
-                                file.name, 
-                                { 
-                                    type: file.type,
-                                    lastModified: Date.now()
-                                }
-                            );
+                            const optimizedFile = new File([blob], file.name, {
+                                type: 'image/jpeg',
+                                lastModified: Date.now()
+                            });
+                            cleanup();
                             resolve(optimizedFile);
                         } else {
-                            reject(new Error('이미지 변환 실패'));
+                            cleanup();
+                            reject(new Error('Blob 변환 실패'));
                         }
                     },
-                    file.type,
+                    'image/jpeg',
                     QUALITY
                 );
                 
             } catch (error) {
+                cleanup();
                 reject(error);
             }
         };
         
         img.onerror = () => {
+            cleanup();
             reject(new Error('이미지 로드 실패'));
         };
         
-        // 이미지 로드
         img.src = URL.createObjectURL(file);
     });
 }
@@ -188,7 +308,7 @@ function addResult(data) {
     
     div.innerHTML = `
         <div class="result-preview">
-            <img src="${data.url}" alt="Uploaded image" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22%3E%3Crect fill=%22%23ddd%22 width=%22100%22 height=%22100%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%23999%22%3E이미지%3C/text%3E%3C/svg%3E'">
+            <img src="${data.url}" alt="Uploaded image" loading="lazy" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22%3E%3Crect fill=%22%23ddd%22 width=%22100%22 height=%22100%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%23999%22%3E이미지%3C/text%3E%3C/svg%3E'">
             <div class="result-info">
                 <h4>${data.filename}${optimizedText}</h4>
                 <div class="file-size">크기: ${sizeText}</div>
@@ -215,8 +335,8 @@ function addResult(data) {
         </div>
     `;
     
-    // 새 결과를 맨 위에 추가 (최신 항목이 위로)
     resultsList.insertBefore(div, resultsList.firstChild);
+    results.style.display = 'block';
 }
 
 window.copyText = function(text, button, type) {
@@ -238,11 +358,7 @@ window.copyText = function(text, button, type) {
 function showError(message) {
     errorDiv.textContent = message;
     errorDiv.style.display = 'block';
-    
-    // 3초 후 자동으로 에러 메시지 숨김
-    setTimeout(() => {
-        errorDiv.style.display = 'none';
-    }, 3000);
+    setTimeout(() => errorDiv.style.display = 'none', 5000);
 }
 
 function formatFileSize(bytes) {
@@ -257,5 +373,10 @@ function escapeQuotes(str) {
     return str.replace(/'/g, "\\'");
 }
 
-console.log('🚀 FTP Image Uploader 준비 완료!');
-console.log(`📐 최적화 설정: 최대 ${MAX_DIMENSION}px, 품질 ${Math.round(QUALITY * 100)}%`);
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+console.log('🚀 FTP Image Uploader 준비 완료! (메모리 안전 모드)');
+console.log(`📐 최적화: 최대 ${MAX_DIMENSION}px, 품질 ${Math.round(QUALITY * 100)}%`);
+console.log(`🛡️ createImageBitmap 지원: ${('createImageBitmap' in window) ? '✅' : '❌ (폴백 모드)'}`);
