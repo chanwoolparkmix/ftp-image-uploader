@@ -34,44 +34,13 @@ loginForm.addEventListener('submit', async (e) => {
     
     loginError.style.display = 'none';
     
-    try {
-        // 인증 정보 임시 저장
-        const testCredentials = btoa(`${username}:${password}`);
-        
-        // 실제 업로드 시도 없이 인증만 테스트
-        // multipart/form-data 없이 POST 요청
-        const verifyResponse = await fetch(API_ENDPOINT, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Basic ${testCredentials}`
-            }
-        });
-        
-        // 401 = 인증 실패
-        if (verifyResponse.status === 401) {
-            throw new Error('잘못된 사용자 이름 또는 비밀번호입니다.');
-        }
-        
-        // 400 = 인증 성공했지만 파일이 없음 (정상)
-        // 200 = 모두 성공 (있을 수 없지만 허용)
-        if (verifyResponse.status === 400 || verifyResponse.status === 200) {
-            console.log('[LOGIN_SUCCESS]');
-            authCredentials = testCredentials;
-            localStorage.setItem('auth', authCredentials);
-            showMainApp();
-            return;
-        }
-        
-        // 500 등 기타 에러
-        const errorData = await verifyResponse.json().catch(() => ({}));
-        throw new Error(errorData.error || '로그인 중 오류가 발생했습니다.');
-        
-    } catch (error) {
-        console.error('[LOGIN_ERROR]', error.message);
-        authCredentials = null;
-        loginError.textContent = error.message || '로그인에 실패했습니다.';
-        loginError.style.display = 'block';
-    }
+    // 인증 정보 저장하고 바로 진입
+    // 실제 인증은 첫 업로드 시도 때 검증됨
+    authCredentials = btoa(`${username}:${password}`);
+    localStorage.setItem('auth', authCredentials);
+    
+    console.log('[LOGIN_SUCCESS] Credentials saved');
+    showMainApp();
 });
 
 // 로그아웃
