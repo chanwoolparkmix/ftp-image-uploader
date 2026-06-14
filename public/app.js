@@ -14,49 +14,44 @@ const results = document.getElementById('results');
 const resultsList = document.getElementById('resultsList');
 const errorDiv = document.getElementById('error');
 const optimizeCheck = document.getElementById('optimizeCheck');
+const adCheck = document.getElementById('adCheck');
+const limitCheck = document.getElementById('limitCheck');
+const limitBadge = document.getElementById('limitBadge');
 
 const API_ENDPOINT = '/api/upload';
 
-// 기본 최적화 설정
 const MAX_DIMENSION = 1200;
 const QUALITY = 0.85;
-
-// 메모리 안전 설정
 const MAX_CANVAS_SIZE = 4096;
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
-// 로그인 폼 제출
+// 용량 제한 체크박스 토글
+limitCheck.addEventListener('change', () => {
+    limitBadge.textContent = limitCheck.checked ? '10MB' : '해제됨';
+});
+
+// 로그인
 loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    
     const username = document.getElementById('username').value;
     const password = document.getElementById('password').value;
-    
     loginError.style.display = 'none';
-    
-    // 인증 정보 저장하고 바로 진입
-    // 실제 인증은 첫 업로드 시도 때 검증됨
     authCredentials = btoa(`${username}:${password}`);
     localStorage.setItem('auth', authCredentials);
-    
-    console.log('[LOGIN_SUCCESS] Credentials saved');
     showMainApp();
 });
 
-// 로그아웃
 logoutBtn.addEventListener('click', () => {
     authCredentials = null;
     localStorage.removeItem('auth');
     showLoginScreen();
 });
 
-// 메인 앱 표시
 function showMainApp() {
     loginContainer.style.display = 'none';
     mainContainer.style.display = 'flex';
 }
 
-// 로그인 화면 표시
 function showLoginScreen() {
     loginContainer.style.display = 'flex';
     mainContainer.style.display = 'none';
@@ -64,7 +59,6 @@ function showLoginScreen() {
     loginError.style.display = 'none';
 }
 
-// 페이지 로드 시 세션 확인
 window.addEventListener('load', () => {
     const savedAuth = localStorage.getItem('auth');
     if (savedAuth) {
@@ -98,20 +92,15 @@ fileInput.addEventListener('change', (e) => {
 
 async function handleFiles(files) {
     if (files.length === 0) return;
-
     errorDiv.style.display = 'none';
     loading.style.display = 'block';
-    
     if (resultsList.children.length === 0) {
         results.style.display = 'none';
     }
-
     for (const file of files) {
         await processOneFile(file);
-        // GC가 메모리를 정리할 시간 제공 (특히 대용량 파일)
         await sleep(300);
     }
-
     loading.style.display = 'none';
     fileInput.value = '';
 }
@@ -122,38 +111,33 @@ async function processOneFile(file) {
         return;
     }
 
-    if (file.size > MAX_FILE_SIZE) {
-        showError(`"${file.name}"의 크기가 10MB를 초과합니다. (${formatFileSize(file.size)})`);
+    // 용량 제한: limitCheck가 체크된 경우에만 10MB 제한 적용
+    if (limitCheck.checked && file.size > DEFAULT_MAX_FILE_SIZE) {
+        showError(`"${file.name}"의 크기가 10MB를 초과합니다. (${formatFileSize(file.size)})\n용량 제한 해제 체크박스를 해제하면 제한 없이 업로드할 수 있습니다.`);
         return;
     }
 
     try {
-        console.log(`[PROCESS_START] ${file.name} (${formatFileSize(file.size)})`);
-        
         let processedFile = file;
         let wasOptimized = false;
-        
+
         if (optimizeCheck.checked) {
-            console.log(`[OPTIMIZE_START] ${file.name}`);
-            
             try {
                 processedFile = await optimizeImageSafely(file);
                 wasOptimized = true;
-                
                 const reduction = ((1 - processedFile.size / file.size) * 100).toFixed(1);
                 console.log(`[OPTIMIZE_DONE] ${formatFileSize(file.size)} -> ${formatFileSize(processedFile.size)} (-${reduction}%)`);
             } catch (optimizeError) {
                 console.warn(`[OPTIMIZE_FAILED] ${optimizeError.message}, using original`);
             }
         }
-        
-        const result = await uploadFile(processedFile, file.name, wasOptimized);
+
+        const isAd = adCheck.checked;
+        const result = await uploadFile(processedFile, file.name, wasOptimized, isAd);
         addResult(result);
-        
+
     } catch (error) {
         console.error('[UPLOAD_ERROR]', error.message);
-        
-        // 401 에러면 로그아웃
         if (error.message.includes('401') || error.message.includes('Authentication')) {
             showError('인증이 만료되었습니다. 다시 로그인해주세요.');
             setTimeout(() => {
@@ -168,9 +152,7 @@ async function processOneFile(file) {
 }
 
 async function optimizeImageSafely(file) {
-    const useBitmap = 'createImageBitmap' in window;
-    
-    if (useBitmap) {
+    if ('createImageBitmap' in window) {
         return await optimizeWithImageBitmap(file);
     } else {
         return await optimizeWithImage(file);
@@ -181,17 +163,13 @@ async function optimizeWithImageBitmap(file) {
     let bitmap = null;
     let canvas = null;
     let ctx = null;
-    
     try {
         bitmap = await createImageBitmap(file);
-        
         let width = bitmap.width;
         let height = bitmap.height;
-        
         if (width > MAX_CANVAS_SIZE * 2 || height > MAX_CANVAS_SIZE * 2) {
             throw new Error(`이미지가 너무 큽니다 (${width}×${height}px). 최대 ${MAX_CANVAS_SIZE * 2}px`);
         }
-        
         if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
             if (width > height) {
                 height = Math.round((height * MAX_DIMENSION) / width);
@@ -201,69 +179,23 @@ async function optimizeWithImageBitmap(file) {
                 height = MAX_DIMENSION;
             }
         }
-        
         canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
-        ctx = canvas.getContext('2d', { 
-            alpha: false,
-            desynchronized: true
-        });
-        
+        ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(bitmap, 0, 0, width, height);
-        
         const blob = await new Promise((resolve, reject) => {
-            try {
-                canvas.toBlob(
-                    (b) => {
-                        if (b) {
-                            resolve(b);
-                        } else {
-                            reject(new Error('Blob 변환 실패'));
-                        }
-                    },
-                    'image/jpeg',
-                    QUALITY
-                );
-            } catch (err) {
-                reject(err);
-            }
+            canvas.toBlob((b) => b ? resolve(b) : reject(new Error('Blob 변환 실패')), 'image/jpeg', QUALITY);
         });
-        
-        const optimizedFile = new File([blob], file.name, {
-            type: 'image/jpeg',
-            lastModified: Date.now()
-        });
-        
-        return optimizedFile;
-        
-    } catch (error) {
-        throw error;
+        return new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() });
     } finally {
-        // 메모리 정리 강화
-        if (bitmap) {
-            try {
-                bitmap.close();
-            } catch (e) {
-                console.warn('[BITMAP_CLOSE_ERROR]', e);
-            }
-        }
-        if (canvas) {
-            canvas.width = 0;
-            canvas.height = 0;
-            canvas = null;
-        }
-        if (ctx) {
-            ctx = null;
-        }
+        if (bitmap) { try { bitmap.close(); } catch(e) {} }
+        if (canvas) { canvas.width = 0; canvas.height = 0; canvas = null; }
+        ctx = null;
         bitmap = null;
-        
-        // 명시적 GC 힌트 (일부 브라우저에서만 작동)
-        if (window.gc) {
-            window.gc();
-        }
+        if (window.gc) window.gc();
     }
 }
 
@@ -272,34 +204,22 @@ async function optimizeWithImage(file) {
         const img = new Image();
         let canvas = null;
         let ctx = null;
-        
         const cleanup = () => {
-            if (canvas) {
-                canvas.width = 0;
-                canvas.height = 0;
-                canvas = null;
-            }
-            if (img.src) {
-                URL.revokeObjectURL(img.src);
-            }
-            if (ctx) {
-                ctx = null;
-            }
+            if (canvas) { canvas.width = 0; canvas.height = 0; canvas = null; }
+            if (img.src) URL.revokeObjectURL(img.src);
+            ctx = null;
             img.onload = null;
             img.onerror = null;
         };
-        
         img.onload = () => {
             try {
                 let width = img.width;
                 let height = img.height;
-                
                 if (width > MAX_CANVAS_SIZE * 2 || height > MAX_CANVAS_SIZE * 2) {
                     cleanup();
                     reject(new Error(`이미지가 너무 큽니다 (${width}×${height}px)`));
                     return;
                 }
-                
                 if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
                     if (width > height) {
                         height = Math.round((height * MAX_DIMENSION) / width);
@@ -309,52 +229,37 @@ async function optimizeWithImage(file) {
                         height = MAX_DIMENSION;
                     }
                 }
-                
                 canvas = document.createElement('canvas');
                 canvas.width = width;
                 canvas.height = height;
                 ctx = canvas.getContext('2d', { alpha: false });
-                
                 ctx.fillStyle = '#FFFFFF';
                 ctx.fillRect(0, 0, width, height);
                 ctx.drawImage(img, 0, 0, width, height);
-                
-                canvas.toBlob(
-                    (blob) => {
-                        if (blob) {
-                            const optimizedFile = new File([blob], file.name, {
-                                type: 'image/jpeg',
-                                lastModified: Date.now()
-                            });
-                            cleanup();
-                            resolve(optimizedFile);
-                        } else {
-                            cleanup();
-                            reject(new Error('Blob 변환 실패'));
-                        }
-                    },
-                    'image/jpeg',
-                    QUALITY
-                );
-                
+                canvas.toBlob((blob) => {
+                    if (blob) {
+                        const f = new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() });
+                        cleanup();
+                        resolve(f);
+                    } else {
+                        cleanup();
+                        reject(new Error('Blob 변환 실패'));
+                    }
+                }, 'image/jpeg', QUALITY);
             } catch (error) {
                 cleanup();
                 reject(error);
             }
         };
-        
-        img.onerror = () => {
-            cleanup();
-            reject(new Error('이미지 로드 실패'));
-        };
-        
+        img.onerror = () => { cleanup(); reject(new Error('이미지 로드 실패')); };
         img.src = URL.createObjectURL(file);
     });
 }
 
-async function uploadFile(file, originalName, wasOptimized) {
+async function uploadFile(file, originalName, wasOptimized, isAd) {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('isAd', isAd ? 'true' : 'false');
 
     const headers = {};
     if (authCredentials) {
@@ -363,86 +268,84 @@ async function uploadFile(file, originalName, wasOptimized) {
 
     const response = await fetch(API_ENDPOINT, {
         method: 'POST',
-        headers: headers,
+        headers,
         body: formData
     });
 
     if (!response.ok) {
-        if (response.status === 401) {
-            throw new Error('Authentication required (401)');
-        }
-        
+        if (response.status === 401) throw new Error('Authentication required (401)');
         const error = await response.json();
         throw new Error(error.error || 'Upload failed');
     }
 
     const data = await response.json();
-    return {
-        ...data,
-        originalName: originalName,
-        originalSize: file.size,
-        optimized: wasOptimized
-    };
+    return { ...data, originalName, originalSize: file.size, optimized: wasOptimized };
 }
 
 function addResult(data) {
     const div = document.createElement('div');
     div.className = 'result-item';
-    
+
     const optimizedText = data.optimized ? ' ✨ 최적화됨' : '';
     const sizeText = data.size ? formatFileSize(data.size) : '';
-    
+    const adBadge = data.isAd
+        ? `<span class="result-ad-badge">📁 /ad/ 폴더</span>`
+        : '';
+
+    // URL과 마크다운을 data 속성에 저장 (escaping 문제 방지)
+    const urlEncoded = encodeURIComponent(data.url);
+    const mdEncoded = encodeURIComponent(data.markdown);
+
     div.innerHTML = `
-        <div class="result-preview">
-            <img src="${data.url}" alt="Uploaded image" loading="lazy" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22%3E%3Crect fill=%22%23ddd%22 width=%22100%22 height=%22100%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%23999%22%3E이미지%3C/text%3E%3C/svg%3E'">
-            <div class="result-info">
-                <h4>${data.filename}${optimizedText}</h4>
-                <div class="file-size">크기: ${sizeText}</div>
+        <div class="result-card">
+            <div class="result-img-wrap">
+                <img src="${data.url}" alt="업로드된 이미지" loading="lazy"
+                    onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22%3E%3Crect fill=%22%23ddd%22 width=%22100%22 height=%22100%22/%3E%3C/svg%3E'">
+            </div>
+            <div class="result-actions">
+                <div class="result-meta">
+                    ${adBadge}
+                    <span class="result-filename">${data.filename}${optimizedText}</span>
+                    <span class="result-size">${sizeText}</span>
+                </div>
+                <button class="copy-btn copy-url-btn" data-encoded="${urlEncoded}">
+                    🔗 URL 복사
+                </button>
+                <button class="copy-btn copy-md-btn" data-encoded="${mdEncoded}">
+                    📝 마크다운 복사
+                </button>
             </div>
         </div>
-
-        <div class="url-box">
-            <label>이미지 URL:</label>
-            <div class="url-text">${data.url}</div>
-        </div>
-
-        <div class="url-box">
-            <label>마크다운:</label>
-            <div class="url-text">${data.markdown}</div>
-        </div>
-
-        <div class="button-group">
-            <button class="copy-btn" onclick="copyText('${escapeQuotes(data.url)}', this, 'URL')">
-                📋 URL 복사
-            </button>
-            <button class="copy-btn" onclick="copyText('${escapeQuotes(data.markdown)}', this, '마크다운')">
-                📝 마크다운 복사
-            </button>
-        </div>
     `;
-    
+
+    // 이벤트 직접 등록 (onclick 문자열 방식 대신)
+    div.querySelector('.copy-url-btn').addEventListener('click', function() {
+        copyText(decodeURIComponent(this.dataset.encoded), this, 'URL');
+    });
+    div.querySelector('.copy-md-btn').addEventListener('click', function() {
+        copyText(decodeURIComponent(this.dataset.encoded), this, '마크다운');
+    });
+
     resultsList.insertBefore(div, resultsList.firstChild);
     results.style.display = 'block';
 }
 
-window.copyText = function(text, button, type) {
+function copyText(text, button, type) {
     navigator.clipboard.writeText(text).then(() => {
         const originalText = button.textContent;
         button.textContent = `✅ ${type} 복사됨!`;
         button.classList.add('copied');
-        
         setTimeout(() => {
             button.textContent = originalText;
             button.classList.remove('copied');
         }, 2000);
-    }).catch(err => {
-        console.error('[COPY_ERROR]', err);
+    }).catch(() => {
         alert('복사에 실패했습니다.');
     });
 }
 
 function showError(message) {
-    errorDiv.textContent = message;
+    errorDiv.innerHTML = message.replace(/\n/g, '<br>');
     errorDiv.style.display = 'block';
     setTimeout(() => errorDiv.style.display = 'none', 5000);
 }
@@ -455,14 +358,8 @@ function formatFileSize(bytes) {
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
 }
 
-function escapeQuotes(str) {
-    return str.replace(/'/g, "\\'");
-}
-
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-console.log('[APP_READY] FTP Image Uploader (Memory Safe Mode)');
-console.log(`[CONFIG] Max dimension: ${MAX_DIMENSION}px, Quality: ${Math.round(QUALITY * 100)}%`);
-console.log(`[FEATURE] createImageBitmap: ${('createImageBitmap' in window) ? 'Yes' : 'No (Fallback)'}`);
+console.log('[APP_READY] FTP Image Uploader');
