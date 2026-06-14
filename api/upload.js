@@ -133,13 +133,20 @@ export default async function handler(req, res) {
     const date = new Date();
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
-    const remotePath = `${FTP_PATH}/${year}/${month}`;
+    const isAd = file.isAd === 'true';
+    const basePath = FTP_PATH.replace(/\/+$/, ''); // 끝 슬래시 제거
+    const remotePath = isAd
+      ? `${basePath}/ad`
+      : `${basePath}/${year}/${month}`;
     const fullPath = `${remotePath}/${filename}`;
 
     // FTP 업로드 (옛날 방식 - Stream 사용)
     await uploadToFTP(file.buffer, fullPath);
 
-    const publicUrl = `${PUBLIC_URL}/${year}/${month}/${filename}`;
+    const publicBase = PUBLIC_URL.replace(/\/+$/, ''); // 끝 슬래시 제거
+    const publicUrl = isAd
+      ? `${publicBase}/ad/${filename}`
+      : `${publicBase}/${year}/${month}/${filename}`;
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const sizeKB = Math.round(file.buffer.length / 1024);
     console.log(`[UPLOAD_SUCCESS] ${filename} (${sizeKB}KB) from ${ip}`);
@@ -149,6 +156,7 @@ export default async function handler(req, res) {
       url: publicUrl,
       filename: filename,
       size: file.buffer.length,
+      isAd: isAd,
       markdown: `![](${publicUrl})`
     });
 
@@ -168,6 +176,11 @@ function parseMultipartForm(req) {
   return new Promise((resolve, reject) => {
     const busboy = Busboy({ headers: req.headers });
     let fileData = null;
+    const fields = {};
+
+    busboy.on('field', (fieldname, value) => {
+      fields[fieldname] = value;
+    });
 
     busboy.on('file', (fieldname, file, info) => {
       const chunks = [];
@@ -182,7 +195,10 @@ function parseMultipartForm(req) {
       file.on('error', reject);
     });
 
-    busboy.on('finish', () => resolve(fileData));
+    busboy.on('finish', () => {
+      if (fileData) fileData.isAd = fields.isAd || 'false';
+      resolve(fileData);
+    });
     busboy.on('error', reject);
     req.pipe(busboy);
   });
