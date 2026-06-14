@@ -292,15 +292,10 @@ function addResult(data) {
         ? `<span class="result-ad-badge">📁 /ad/ 폴더</span>`
         : '';
 
-    // URL과 마크다운을 data 속성에 저장 (escaping 문제 방지)
-    const urlEncoded = encodeURIComponent(data.url);
-    const mdEncoded = encodeURIComponent(data.markdown);
-
     div.innerHTML = `
         <div class="result-card">
             <div class="result-img-wrap">
-                <img src="${data.url}" alt="업로드된 이미지" loading="lazy"
-                    onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%22 height=%22100%22%3E%3Crect fill=%22%23ddd%22 width=%22100%22 height=%22100%22/%3E%3C/svg%3E'">
+                <img alt="업로드된 이미지" loading="lazy">
             </div>
             <div class="result-actions">
                 <div class="result-meta">
@@ -308,22 +303,30 @@ function addResult(data) {
                     <span class="result-filename">${data.filename}${optimizedText}</span>
                     <span class="result-size">${sizeText}</span>
                 </div>
-                <button class="copy-btn copy-url-btn" data-encoded="${urlEncoded}">
+                <button class="copy-btn copy-url-btn">
                     🔗 URL 복사
                 </button>
-                <button class="copy-btn copy-md-btn" data-encoded="${mdEncoded}">
+                <button class="copy-btn copy-md-btn">
                     📝 마크다운 복사
                 </button>
             </div>
         </div>
     `;
 
-    // 이벤트 직접 등록 (onclick 문자열 방식 대신)
+    // img src 직접 설정 (innerHTML에 URL 넣으면 특수문자에서 깨짐)
+    const img = div.querySelector('img');
+    img.src = data.url;
+    img.onerror = () => {
+        img.style.display = 'none';
+        img.parentElement.style.background = '#ddd';
+    };
+
+    // 버튼 이벤트 직접 등록
     div.querySelector('.copy-url-btn').addEventListener('click', function() {
-        copyText(decodeURIComponent(this.dataset.encoded), this, 'URL');
+        copyText(data.url, this, 'URL');
     });
     div.querySelector('.copy-md-btn').addEventListener('click', function() {
-        copyText(decodeURIComponent(this.dataset.encoded), this, '마크다운');
+        copyText(data.markdown, this, '마크다운');
     });
 
     resultsList.insertBefore(div, resultsList.firstChild);
