@@ -35,32 +35,57 @@
             <div class="header">
                 <h1>🖼️ 이미지 업로더</h1>
                 <p>FTP 서버에 안전하게 이미지를 업로드하세요</p>
-                <button class="logout-btn" id="logoutBtn">로그아웃</button>
+                <div class="header-actions">
+                    <button class="settings-btn" id="settingsBtn" type="button" aria-label="설정" title="설정">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                    </button>
+                    <button class="logout-btn" id="logoutBtn" type="button">로그아웃</button>
+                </div>
             </div>
             
             <div class="upload-section">
                 <div class="upload-area" id="uploadArea">
                     <div class="upload-icon">📤</div>
                     <p class="upload-text">이미지를 여기에 드래그하거나 클릭하세요</p>
-                    <p class="upload-hint">JPEG, PNG, GIF, WebP 지원 (최대 10MB)</p>
+                    <p class="upload-hint">JPEG, PNG, GIF, WebP, AVIF 지원 (최대 10MB)</p>
                     <input type="file" id="fileInput" accept="image/*" multiple style="display: none;">
                 </div>
 
-                <div class="options">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="optimizeCheck" checked>
-                        <span>이미지 자동 최적화 (1200px, 85% 품질)</span>
-                    </label>
-                    <label class="checkbox-label checkbox-ad">
-                        <input type="checkbox" id="adCheck">
-                        <span>광고 이미지 저장 <em class="folder-badge">→ /ad/</em></span>
-                    </label>
-                    <label class="checkbox-label checkbox-limit">
-                        <input type="checkbox" id="limitCheck" checked>
-                        <span>업로드 용량 제한 <em class="limit-badge" id="limitBadge">10MB</em></span>
-                    </label>
-                </div>
+                <!-- 현재 적용 중인 설정 요약 (클릭하면 설정 열림) -->
+                <button class="settings-summary" id="settingsSummary" type="button" title="설정 열기"></button>
             </div>
+
+            <!-- 설정 모달 -->
+            <dialog class="settings-modal" id="settingsModal" aria-labelledby="settingsTitle">
+                <form method="dialog" class="settings-panel">
+                    <div class="settings-head">
+                        <h2 id="settingsTitle">⚙️ 업로드 설정</h2>
+                        <button class="settings-close" type="submit" aria-label="닫기">✕</button>
+                    </div>
+                    <div class="options">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="webpCheck" checked>
+                            <span>WebP 자동 변환 <small>AVIF·JPEG·PNG·GIF → WebP (GIF는 첫 프레임만)</small></span>
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="optimizeCheck" checked>
+                            <span>이미지 자동 최적화 <small>최대 1200px, 85% 품질</small></span>
+                        </label>
+                        <label class="checkbox-label checkbox-ad">
+                            <input type="checkbox" id="adCheck">
+                            <span>광고 이미지 저장 <em class="folder-badge">→ /ad/</em></span>
+                        </label>
+                        <label class="checkbox-label checkbox-limit">
+                            <input type="checkbox" id="limitCheck" checked>
+                            <span>업로드 용량 제한 <em class="limit-badge" id="limitBadge">10MB</em></span>
+                        </label>
+                    </div>
+                    <button class="settings-done" type="submit">완료</button>
+                </form>
+            </dialog>
 
             <div class="loading" id="loading" style="display: none;">
                 <div class="spinner"></div>

@@ -14,6 +14,7 @@ const results = document.getElementById('results');
 const resultsList = document.getElementById('resultsList');
 const errorDiv = document.getElementById('error');
 const optimizeCheck = document.getElementById('optimizeCheck');
+const webpCheck = document.getElementById('webpCheck');
 const adCheck = document.getElementById('adCheck');
 const limitCheck = document.getElementById('limitCheck');
 const limitBadge = document.getElementById('limitBadge');
@@ -25,10 +26,51 @@ const QUALITY = 0.85;
 const MAX_CANVAS_SIZE = 4096;
 const DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
+const settingsBtn = document.getElementById('settingsBtn');
+const settingsModal = document.getElementById('settingsModal');
+const settingsSummary = document.getElementById('settingsSummary');
+
 // 용량 제한 체크박스 토글
 limitCheck.addEventListener('change', () => {
     limitBadge.textContent = limitCheck.checked ? '10MB' : '해제됨';
 });
+
+// ── 설정 모달 ──
+function openSettings() {
+    if (typeof settingsModal.showModal === 'function') {
+        settingsModal.showModal();
+    } else {
+        settingsModal.setAttribute('open', ''); // <dialog> 미지원 브라우저 대비
+    }
+}
+
+function closeSettings() {
+    if (typeof settingsModal.close === 'function') settingsModal.close();
+    else settingsModal.removeAttribute('open');
+}
+
+settingsBtn.addEventListener('click', openSettings);
+settingsSummary.addEventListener('click', openSettings);
+
+// 바깥(배경) 클릭 시 닫기
+settingsModal.addEventListener('click', (e) => {
+    if (e.target === settingsModal) closeSettings();
+});
+
+// 현재 설정 요약 표시
+function updateSettingsSummary() {
+    const chips = [];
+    if (webpCheck.checked) chips.push('<span class="chip">WebP 변환</span>');
+    if (optimizeCheck.checked) chips.push('<span class="chip">최적화 1200px</span>');
+    if (adCheck.checked) chips.push('<span class="chip chip-ad">광고 → /ad/</span>');
+    chips.push(limitCheck.checked
+        ? '<span class="chip">용량 10MB 제한</span>'
+        : '<span class="chip chip-warn">용량 제한 해제</span>');
+    settingsSummary.innerHTML = `<span class="summary-label">⚙️ 현재 설정</span>${chips.join('')}`;
+}
+
+[webpCheck, optimizeCheck, adCheck, limitCheck].forEach((el) => el.addEventListener('change', updateSettingsSummary));
+updateSettingsSummary();
 
 // 로그인
 loginForm.addEventListener('submit', async (e) => {
@@ -105,8 +147,27 @@ async function handleFiles(files) {
     fileInput.value = '';
 }
 
+function getExtension(name) {
+    const i = name.lastIndexOf('.');
+    return i === -1 ? '' : name.slice(i + 1).toLowerCase();
+}
+
+function replaceExtension(name, ext) {
+    const i = name.lastIndexOf('.');
+    return (i === -1 ? name : name.slice(0, i)) + '.' + ext;
+}
+
+// 일부 OS/브라우저는 AVIF 파일의 MIME 타입을 비워서 넘기므로 확장자로 보완
+function getMimeType(file) {
+    if (file.type) return file.type;
+    const ext = getExtension(file.name);
+    const map = { avif: 'image/avif', webp: 'image/webp', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif' };
+    return map[ext] || '';
+}
+
 async function processOneFile(file) {
-    if (!file.type.startsWith('image/')) {
+    const mime = getMimeType(file);
+    if (!mime.startsWith('image/')) {
         showError(`"${file.name}"은(는) 이미지 파일이 아닙니다.`);
         return;
     }
@@ -120,20 +181,38 @@ async function processOneFile(file) {
     try {
         let processedFile = file;
         let wasOptimized = false;
+        let wasConverted = false;
 
-        if (optimizeCheck.checked) {
+        // GIF도 변환 대상 (캔버스에는 첫 프레임만 그려지므로 애니메이션은 제거됨)
+        const wantWebp = webpCheck.checked;
+        const wantResize = optimizeCheck.checked;
+        // 이미 WebP이고 리사이즈도 안 하면 다시 인코딩할 필요 없음
+        const needWebpEncode = wantWebp && (mime !== 'image/webp' || wantResize);
+
+        if (wantResize || needWebpEncode) {
             try {
-                processedFile = await optimizeImageSafely(file);
-                wasOptimized = true;
+                processedFile = await processImage(file, {
+                    resize: wantResize,
+                    format: wantWebp ? 'image/webp' : 'image/jpeg'
+                });
+                wasOptimized = wantResize;
+                wasConverted = processedFile.type === 'image/webp' && mime !== 'image/webp';
                 const reduction = ((1 - processedFile.size / file.size) * 100).toFixed(1);
-                console.log(`[OPTIMIZE_DONE] ${formatFileSize(file.size)} -> ${formatFileSize(processedFile.size)} (-${reduction}%)`);
-            } catch (optimizeError) {
-                console.warn(`[OPTIMIZE_FAILED] ${optimizeError.message}, using original`);
+                console.log(`[PROCESS_DONE] ${mime} -> ${processedFile.type} ${formatFileSize(file.size)} -> ${formatFileSize(processedFile.size)} (-${reduction}%)`);
+            } catch (processError) {
+                console.warn(`[PROCESS_FAILED] ${processError.message}, using original`);
+                processedFile = file;
             }
+        }
+
+        // 원본 그대로 올리는데 MIME 타입이 비어 있으면(AVIF 등) 타입을 채워서 전송
+        if (processedFile === file && !file.type && mime) {
+            processedFile = new File([file], file.name, { type: mime, lastModified: file.lastModified });
         }
 
         const isAd = adCheck.checked;
         const result = await uploadFile(processedFile, file.name, wasOptimized, isAd);
+        result.converted = wasConverted;
         addResult(result);
 
     } catch (error) {
@@ -151,26 +230,37 @@ async function processOneFile(file) {
     }
 }
 
-async function optimizeImageSafely(file) {
+// 이미지 디코딩 (createImageBitmap 우선, 없으면 <img> 사용)
+async function decodeImage(file) {
     if ('createImageBitmap' in window) {
-        return await optimizeWithImageBitmap(file);
-    } else {
-        return await optimizeWithImage(file);
+        const bitmap = await createImageBitmap(file);
+        return { source: bitmap, width: bitmap.width, height: bitmap.height, release: () => { try { bitmap.close(); } catch (e) {} } };
+    }
+    const url = URL.createObjectURL(file);
+    try {
+        const img = await new Promise((resolve, reject) => {
+            const el = new Image();
+            el.onload = () => resolve(el);
+            el.onerror = () => reject(new Error('이미지 로드 실패 (브라우저가 이 형식을 지원하지 않을 수 있음)'));
+            el.src = url;
+        });
+        return { source: img, width: img.naturalWidth, height: img.naturalHeight, release: () => URL.revokeObjectURL(url) };
+    } catch (e) {
+        URL.revokeObjectURL(url);
+        throw e;
     }
 }
 
-async function optimizeWithImageBitmap(file) {
-    let bitmap = null;
+// 리사이즈 및 포맷 변환 (format: 'image/webp' | 'image/jpeg')
+async function processImage(file, { resize, format }) {
+    const decoded = await decodeImage(file);
     let canvas = null;
-    let ctx = null;
     try {
-        bitmap = await createImageBitmap(file);
-        let width = bitmap.width;
-        let height = bitmap.height;
+        let { width, height } = decoded;
         if (width > MAX_CANVAS_SIZE * 2 || height > MAX_CANVAS_SIZE * 2) {
             throw new Error(`이미지가 너무 큽니다 (${width}×${height}px). 최대 ${MAX_CANVAS_SIZE * 2}px`);
         }
-        if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+        if (resize && (width > MAX_DIMENSION || height > MAX_DIMENSION)) {
             if (width > height) {
                 height = Math.round((height * MAX_DIMENSION) / width);
                 width = MAX_DIMENSION;
@@ -179,80 +269,43 @@ async function optimizeWithImageBitmap(file) {
                 height = MAX_DIMENSION;
             }
         }
+
+        // WebP는 투명도를 지원하므로 배경을 채우지 않음. JPEG만 흰 배경 적용.
+        const keepAlpha = format === 'image/webp';
         canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
-        ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(bitmap, 0, 0, width, height);
-        const blob = await new Promise((resolve, reject) => {
-            canvas.toBlob((b) => b ? resolve(b) : reject(new Error('Blob 변환 실패')), 'image/jpeg', QUALITY);
-        });
-        return new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() });
+        const ctx = canvas.getContext('2d', { alpha: keepAlpha });
+        if (!keepAlpha) {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, width, height);
+        }
+        ctx.drawImage(decoded.source, 0, 0, width, height);
+
+        let blob = await canvasToBlob(canvas, format, QUALITY);
+        let outType = format;
+
+        // 일부 브라우저(구형 Safari 등)는 WebP 인코딩을 지원하지 않아 PNG로 돌려줌 → JPEG로 대체
+        if (format === 'image/webp' && blob.type !== 'image/webp') {
+            console.warn('[WEBP_UNSUPPORTED] 이 브라우저는 WebP 인코딩을 지원하지 않아 JPEG로 저장합니다');
+            ctx.globalCompositeOperation = 'destination-over';
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, width, height);
+            blob = await canvasToBlob(canvas, 'image/jpeg', QUALITY);
+            outType = 'image/jpeg';
+        }
+
+        const ext = outType === 'image/webp' ? 'webp' : 'jpg';
+        return new File([blob], replaceExtension(file.name, ext), { type: outType, lastModified: Date.now() });
     } finally {
-        if (bitmap) { try { bitmap.close(); } catch(e) {} }
-        if (canvas) { canvas.width = 0; canvas.height = 0; canvas = null; }
-        ctx = null;
-        bitmap = null;
-        if (window.gc) window.gc();
+        decoded.release();
+        if (canvas) { canvas.width = 0; canvas.height = 0; }
     }
 }
 
-async function optimizeWithImage(file) {
+function canvasToBlob(canvas, type, quality) {
     return new Promise((resolve, reject) => {
-        const img = new Image();
-        let canvas = null;
-        let ctx = null;
-        const cleanup = () => {
-            if (canvas) { canvas.width = 0; canvas.height = 0; canvas = null; }
-            if (img.src) URL.revokeObjectURL(img.src);
-            ctx = null;
-            img.onload = null;
-            img.onerror = null;
-        };
-        img.onload = () => {
-            try {
-                let width = img.width;
-                let height = img.height;
-                if (width > MAX_CANVAS_SIZE * 2 || height > MAX_CANVAS_SIZE * 2) {
-                    cleanup();
-                    reject(new Error(`이미지가 너무 큽니다 (${width}×${height}px)`));
-                    return;
-                }
-                if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
-                    if (width > height) {
-                        height = Math.round((height * MAX_DIMENSION) / width);
-                        width = MAX_DIMENSION;
-                    } else {
-                        width = Math.round((width * MAX_DIMENSION) / height);
-                        height = MAX_DIMENSION;
-                    }
-                }
-                canvas = document.createElement('canvas');
-                canvas.width = width;
-                canvas.height = height;
-                ctx = canvas.getContext('2d', { alpha: false });
-                ctx.fillStyle = '#FFFFFF';
-                ctx.fillRect(0, 0, width, height);
-                ctx.drawImage(img, 0, 0, width, height);
-                canvas.toBlob((blob) => {
-                    if (blob) {
-                        const f = new File([blob], file.name, { type: 'image/jpeg', lastModified: Date.now() });
-                        cleanup();
-                        resolve(f);
-                    } else {
-                        cleanup();
-                        reject(new Error('Blob 변환 실패'));
-                    }
-                }, 'image/jpeg', QUALITY);
-            } catch (error) {
-                cleanup();
-                reject(error);
-            }
-        };
-        img.onerror = () => { cleanup(); reject(new Error('이미지 로드 실패')); };
-        img.src = URL.createObjectURL(file);
+        canvas.toBlob((b) => b ? resolve(b) : reject(new Error('Blob 변환 실패')), type, quality);
     });
 }
 
@@ -286,7 +339,7 @@ function addResult(data) {
     const div = document.createElement('div');
     div.className = 'result-item';
 
-    const optimizedText = data.optimized ? ' ✨ 최적화됨' : '';
+    const optimizedText = (data.converted ? ' 🔄 WebP 변환' : '') + (data.optimized ? ' ✨ 최적화됨' : '');
     const sizeText = data.size ? formatFileSize(data.size) : '';
     const adBadge = data.isAd
         ? `<span class="result-ad-badge">📁 /ad/ 폴더</span>`

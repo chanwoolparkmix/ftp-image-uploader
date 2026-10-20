@@ -105,10 +105,10 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'No file provided', errorCode: 'ERR_NO_FILE' });
     }
 
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif'];
     if (!allowedTypes.includes(file.mimetype)) {
       return res.status(400).json({ 
-        error: 'Invalid file type. Allowed: JPEG, PNG, GIF, WebP',
+        error: 'Invalid file type. Allowed: JPEG, PNG, GIF, WebP, AVIF',
         errorCode: 'ERR_INVALID_TYPE'
       });
     }
@@ -129,7 +129,7 @@ export default async function handler(req, res) {
     }
 
     // 파일명 생성 (옛날 방식 사용 - UUID 대신 짧은 랜덤값)
-    const filename = generateSecureFilename(file.filename);
+    const filename = generateSecureFilename(file.mimetype);
     const date = new Date();
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -204,9 +204,17 @@ function parseMultipartForm(req) {
   });
 }
 
-// 파일명 생성 (옛날 방식 - 짧고 안전)
-function generateSecureFilename(originalName) {
-  const ext = originalName.split('.').pop().toLowerCase();
+// 파일명 생성 (확장자는 검증된 MIME 타입 기준 → 변환된 파일은 항상 .webp)
+const MIME_EXT = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/avif': 'avif'
+};
+
+function generateSecureFilename(mimetype) {
+  const ext = MIME_EXT[mimetype] || 'bin';
   const random = crypto.randomBytes(8).toString('hex');
   const timestamp = Date.now();
   return `img-${timestamp}-${random}.${ext}`;
@@ -222,6 +230,13 @@ function isValidImageSignature(buffer, mimetype) {
     'image/gif': [[0x47, 0x49, 0x46, 0x38, 0x37, 0x61], [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]],
     'image/webp': [[0x52, 0x49, 0x46, 0x46]]
   };
+
+  // AVIF: ISO BMFF 구조 → 4~7바이트 'ftyp', 8~11바이트 'avif' 또는 'avis'
+  if (mimetype === 'image/avif') {
+    const boxType = buffer.toString('ascii', 4, 8);
+    const brand = buffer.toString('ascii', 8, 12);
+    return boxType === 'ftyp' && (brand === 'avif' || brand === 'avis');
+  }
 
   const expectedSigs = signatures[mimetype];
   if (!expectedSigs) return false;
