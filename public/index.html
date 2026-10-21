@@ -74,6 +74,24 @@
                             <input type="checkbox" id="optimizeCheck" checked>
                             <span>이미지 자동 최적화 <small>최대 1200px, 85% 품질</small></span>
                         </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="srcsetCheck" checked>
+                            <span>srcset 생성 <small>비율은 그대로, 긴 폭을 아래 길이로 줄인 파일을 이름 뒤에 붙여 추가 생성</small></span>
+                        </label>
+                        <div class="srcset-editor" id="srcsetEditor">
+                            <div class="srcset-head">
+                                <span>이름</span>
+                                <span>긴 폭 (px)</span>
+                                <span></span>
+                            </div>
+                            <div id="srcsetRows"></div>
+                            <div class="srcset-tools">
+                                <button type="button" class="srcset-add" id="addVariantBtn">+ 사이즈 추가</button>
+                                <button type="button" class="srcset-reset" id="resetVariantBtn">기본값으로</button>
+                            </div>
+                            <p class="srcset-preview" id="srcsetPreview"></p>
+                            <p class="srcset-error" id="srcsetError" hidden></p>
+                        </div>
                         <label class="checkbox-label checkbox-ad">
                             <input type="checkbox" id="adCheck">
                             <span>광고 이미지 저장 <em class="folder-badge">→ /ad/</em></span>

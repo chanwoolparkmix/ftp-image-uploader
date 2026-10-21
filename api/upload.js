@@ -128,9 +128,38 @@ export default async function handler(req, res) {
       });
     }
 
-    // 파일명 생성 (옛날 방식 사용 - UUID 대신 짧은 랜덤값)
-    const filename = generateSecureFilename(file.mimetype);
-    const date = new Date();
+    // 파일명 결정
+    // - 일반 업로드: 새 기본 이름 생성 (img-<timestamp>-<random>)
+    // - srcset 변형 업로드: 앞서 받은 기본 이름 + "-<변형이름>" (같은 폴더에 저장)
+    let baseName;
+    let timestamp;
+    let variant = null;
+
+    if (file.baseName || file.variant) {
+      const match = /^img-(\d{13})-([0-9a-f]{16})$/.exec(file.baseName || '');
+      if (!match) {
+        return res.status(400).json({ error: 'Invalid base name', errorCode: 'ERR_INVALID_BASENAME' });
+      }
+      if (!/^[a-z0-9_-]{1,30}$/.test(file.variant || '')) {
+        return res.status(400).json({ error: 'Invalid variant name (a-z, 0-9, -, _ / max 30)', errorCode: 'ERR_INVALID_VARIANT' });
+      }
+      timestamp = Number(match[1]);
+      // 방금 업로드된 파일에 대해서만 변형 추가 허용 (오래된 파일 덮어쓰기 방지)
+      const age = Date.now() - timestamp;
+      if (age < -5 * 60 * 1000 || age > 60 * 60 * 1000) {
+        return res.status(400).json({ error: 'Base name expired', errorCode: 'ERR_BASENAME_EXPIRED' });
+      }
+      baseName = file.baseName;
+      variant = file.variant;
+    } else {
+      timestamp = Date.now();
+      baseName = generateBaseName(timestamp);
+    }
+
+    const ext = MIME_EXT[file.mimetype] || 'bin';
+    const filename = variant ? `${baseName}-${variant}.${ext}` : `${baseName}.${ext}`;
+    // 폴더는 기본 이름의 타임스탬프 기준 → 월이 바뀌는 순간에도 변형이 같은 폴더로 감
+    const date = new Date(timestamp);
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const isAd = file.isAd === 'true';
@@ -155,6 +184,8 @@ export default async function handler(req, res) {
       success: true,
       url: publicUrl,
       filename: filename,
+      baseName: baseName,
+      variant: variant,
       size: file.buffer.length,
       isAd: isAd,
       markdown: `![](${publicUrl})`
@@ -196,7 +227,11 @@ function parseMultipartForm(req) {
     });
 
     busboy.on('finish', () => {
-      if (fileData) fileData.isAd = fields.isAd || 'false';
+      if (fileData) {
+        fileData.isAd = fields.isAd || 'false';
+        fileData.baseName = fields.baseName || '';
+        fileData.variant = fields.variant || '';
+      }
       resolve(fileData);
     });
     busboy.on('error', reject);
@@ -204,7 +239,7 @@ function parseMultipartForm(req) {
   });
 }
 
-// 파일명 생성 (확장자는 검증된 MIME 타입 기준 → 변환된 파일은 항상 .webp)
+// 확장자는 검증된 MIME 타입 기준 → 변환된 파일은 항상 .webp
 const MIME_EXT = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -213,11 +248,9 @@ const MIME_EXT = {
   'image/avif': 'avif'
 };
 
-function generateSecureFilename(mimetype) {
-  const ext = MIME_EXT[mimetype] || 'bin';
+function generateBaseName(timestamp) {
   const random = crypto.randomBytes(8).toString('hex');
-  const timestamp = Date.now();
-  return `img-${timestamp}-${random}.${ext}`;
+  return `img-${timestamp}-${random}`;
 }
 
 // 파일 시그니처 검증 (매직 넘버)
