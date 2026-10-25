@@ -847,3 +847,26 @@ body {
         text-align: center;
     }
 }
+
+/* ── 설정 동기화 상태 ── */
+.sync-status {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #888;
+    text-align: center;
+    min-height: 1.2em;
+}
+
+.sync-status[data-state="synced"] {
+    color: #2e7d32;
+}
+
+.sync-status[data-state="error"] {
+    color: #c62828;
+}
+
+.variants-skipped {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #888;
+}

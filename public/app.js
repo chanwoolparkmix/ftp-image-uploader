@@ -68,24 +68,193 @@ const resetVariantBtn = document.getElementById('resetVariantBtn');
 
 const DEFAULT_VARIANTS = [
     { name: 'large', px: 1200 },
-    { name: 'medium', px: 800 },
-    { name: 'small', px: 400 }
+    { name: 'medium', px: 860 },
+    { name: 'small', px: 480 }
 ];
+// 이전 버전의 기본값 (그대로 쓰던 경우 새 기본값으로 교체)
+const OLD_DEFAULT_VARIANTS_JSON = JSON.stringify([
+    { name: 'large', px: 1200 }, { name: 'medium', px: 800 }, { name: 'small', px: 400 }
+]);
 const MAX_VARIANTS = 10;
 const MAX_VARIANT_PX = MAX_CANVAS_SIZE * 2;
-const VARIANT_STORAGE_KEY = 'srcsetVariants';
+const LEGACY_VARIANT_KEY = 'srcsetVariants'; // 예전 버전(이 기기에만 저장)
 
-function loadVariants() {
+// ── 설정 동기화 (모든 기기에서 동일한 설정) ──
+// 서버(FTP의 JSON 파일)가 기준이고, localStorage는 오프라인/빠른 로딩용 캐시.
+const SETTINGS_API = '/api/settings';
+const SETTINGS_CACHE_KEY = 'uploaderSettings';
+const SYNC_DELAY = 800;          // 변경 후 이 시간(ms) 동안 추가 변경이 없으면 저장
+const PULL_MIN_INTERVAL = 5000;  // 포커스 복귀 시 서버 확인 최소 간격
+
+const syncStatus = document.getElementById('syncStatus');
+let applyingSettings = false;    // 코드가 설정을 적용하는 중에는 저장 예약을 막음
+let syncTimer = null;
+let pushing = false;
+let pushQueued = false;
+let lastPullAt = 0;
+
+// 동기화 대상: srcset 사용 여부 + 사이즈 목록만.
+// WebP·최적화·광고·용량 제한은 저장하지 않고 접속할 때마다 기본값으로 시작한다.
+function defaultSettings() {
+    return {
+        srcset: true,
+        variants: DEFAULT_VARIANTS.map((v) => ({ ...v }))
+    };
+}
+
+// 누락/손상된 값은 기본값으로 채움
+function normalizeSettings(raw) {
+    const d = defaultSettings();
+    if (!raw || typeof raw !== 'object') return d;
+    const out = { srcset: typeof raw.srcset === 'boolean' ? raw.srcset : d.srcset };
+    const variants = Array.isArray(raw.variants)
+        ? raw.variants
+            .filter((v) => v && typeof v.name === 'string' && Number.isFinite(Number(v.px)))
+            .slice(0, MAX_VARIANTS)
+            .map((v) => ({ name: v.name, px: Number(v.px) }))
+        : [];
+    out.variants = variants.length && JSON.stringify(variants) !== OLD_DEFAULT_VARIANTS_JSON ? variants : d.variants;
+    return out;
+}
+
+function loadCache() {
     try {
-        const saved = JSON.parse(localStorage.getItem(VARIANT_STORAGE_KEY));
-        if (Array.isArray(saved) && saved.length) return saved.slice(0, MAX_VARIANTS);
+        const cached = JSON.parse(localStorage.getItem(SETTINGS_CACHE_KEY));
+        if (cached && cached.settings) return { settings: normalizeSettings(cached.settings), dirty: !!cached.dirty };
     } catch (e) {}
-    return DEFAULT_VARIANTS.map((v) => ({ ...v }));
+    // 예전 버전에서 저장해 둔 사이즈 목록이 있으면 이어받기
+    const settings = defaultSettings();
+    try {
+        const legacy = JSON.parse(localStorage.getItem(LEGACY_VARIANT_KEY));
+        if (Array.isArray(legacy) && legacy.length) settings.variants = normalizeSettings({ variants: legacy }).variants;
+    } catch (e) {}
+    return { settings, dirty: false };
 }
 
-function saveVariants(list) {
-    try { localStorage.setItem(VARIANT_STORAGE_KEY, JSON.stringify(list)); } catch (e) {}
+function saveCache(settings, dirty) {
+    try { localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify({ settings, dirty })); } catch (e) {}
 }
+
+function setSyncStatus(state) {
+    if (!syncStatus) return;
+    const text = {
+        pending: '변경 사항 저장 대기 중…',
+        saving: '☁️ 저장 중…',
+        synced: '☁️ 모든 기기에 동기화됨',
+        error: '⚠️ 동기화 실패 — 이 기기에는 저장됨, 나중에 자동으로 다시 시도합니다'
+    }[state] || '';
+    syncStatus.textContent = text;
+    syncStatus.dataset.state = state || '';
+}
+
+function authHeaders(extra = {}) {
+    const headers = { ...extra };
+    if (authCredentials) headers['Authorization'] = `Basic ${authCredentials}`;
+    return headers;
+}
+
+// 화면의 현재 설정 읽기
+function collectSettings() {
+    return {
+        srcset: srcsetCheck.checked,
+        variants: readVariantRows().list
+    };
+}
+
+// 설정을 화면에 반영 (저장은 트리거하지 않음)
+function applySettings(settings) {
+    applyingSettings = true;
+    try {
+        srcsetCheck.checked = settings.srcset;
+        renderVariantRows(settings.variants);
+        updateSrcsetEditorState();
+        updateSettingsSummary();
+    } finally {
+        applyingSettings = false;
+    }
+}
+
+// 사용자가 설정을 바꿨을 때 호출: 캐시에 즉시 저장 + 서버 저장 예약
+function scheduleSync() {
+    if (applyingSettings) return;
+    saveCache(collectSettings(), true);
+    setSyncStatus('pending');
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(pushSettings, SYNC_DELAY);
+}
+
+async function pushSettings() {
+    syncTimer = null;
+    if (!authCredentials) return;
+    if (pushing) { pushQueued = true; return; }
+    pushing = true;
+    const settings = collectSettings();
+    setSyncStatus('saving');
+    try {
+        const response = await fetch(SETTINGS_API, {
+            method: 'PUT',
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ settings })
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        // 저장하는 사이 또 바뀌었다면 dirty 유지 (다음 저장에서 반영됨)
+        if (!syncTimer && !pushQueued) saveCache(settings, false);
+        setSyncStatus(syncTimer || pushQueued ? 'pending' : 'synced');
+    } catch (e) {
+        console.warn('[SETTINGS_PUSH_FAILED]', e.message);
+        setSyncStatus('error');
+    } finally {
+        pushing = false;
+        if (pushQueued) { pushQueued = false; pushSettings(); }
+    }
+}
+
+// 서버의 설정을 불러와 이 기기에 적용
+async function pullSettings() {
+    if (!authCredentials || pushing || syncTimer) return;
+    if (settingsModal.open) return; // 편집 중에는 덮어쓰지 않음
+    lastPullAt = Date.now();
+    try {
+        const response = await fetch(SETTINGS_API, { headers: authHeaders() });
+        if (response.status === 401) { handleAuthFailure(); return; }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const cache = loadCache();
+
+        // 아직 서버에 못 올린 변경이 있거나, 서버에 저장된 설정이 처음 없는 경우 → 이 기기 값을 올림
+        if (cache.dirty || !data.settings) {
+            await pushSettings();
+            return;
+        }
+
+        const remote = normalizeSettings(data.settings);
+        if (JSON.stringify(remote) !== JSON.stringify(normalizeSettings(collectSettings()))) {
+            applySettings(remote);
+        }
+        saveCache(remote, false);
+        setSyncStatus('synced');
+    } catch (e) {
+        console.warn('[SETTINGS_PULL_FAILED]', e.message);
+        setSyncStatus('error');
+    }
+}
+
+function handleAuthFailure() {
+    authCredentials = null;
+    localStorage.removeItem('auth');
+    showLoginScreen();
+    loginError.textContent = '아이디 또는 비밀번호가 올바르지 않습니다.';
+    loginError.style.display = 'block';
+}
+
+// 다른 기기에서 바꾼 내용을, 이 창으로 돌아올 때 가져오기
+function pullIfStale() {
+    if (document.visibilityState === 'hidden') return;
+    if (Date.now() - lastPullAt < PULL_MIN_INTERVAL) return;
+    pullSettings();
+}
+document.addEventListener('visibilitychange', pullIfStale);
+window.addEventListener('focus', pullIfStale);
 
 // 이름은 파일명에 들어가므로 영문 소문자/숫자/-/_ 만 허용
 function sanitizeVariantName(value) {
@@ -141,7 +310,7 @@ function readVariantRows() {
         if (!name) { errors.push('이름이 비어 있는 사이즈가 있습니다.'); invalid = true; }
         else if (seen.has(name)) { errors.push(`이름 "${name}"이(가) 중복됩니다.`); invalid = true; }
         if (!Number.isInteger(px) || px < 1 || px > MAX_VARIANT_PX) {
-            errors.push(`${name || '(이름 없음)'}: 긴 폭은 1~${MAX_VARIANT_PX} 사이 정수여야 합니다.`);
+            errors.push(`${name || '(이름 없음)'}: 가로 폭은 1~${MAX_VARIANT_PX} 사이 정수여야 합니다.`);
             invalid = true;
         }
         row.classList.toggle('invalid', invalid);
@@ -155,27 +324,37 @@ function getActiveVariants() {
     return readVariantRows().list;
 }
 
+// 사용자가 사이즈 목록을 바꿨을 때: 화면 갱신 + 서버 저장 예약
 function onVariantsChanged() {
+    refreshVariantUI();
+    scheduleSync();
+}
+
+function refreshVariantUI() {
     const { list, errors } = readVariantRows();
-    saveVariants(list);
     srcsetError.hidden = errors.length === 0;
     srcsetError.innerHTML = errors.join('<br>');
     const ext = webpCheck.checked ? 'webp' : 'jpg';
     const note = webpCheck.checked ? '' : ' (확장자는 최종 파일 형식을 따름)';
     srcsetPreview.textContent = list.length
-        ? `예: img-…-${list[0].name}.${ext} · ${list.length}개 추가 생성${note}`
+        ? `예: img-…-${list[0].name}.${ext} · 최종 이미지의 가로 폭보다 작은 사이즈만 생성${note}`
         : '생성할 사이즈가 없습니다.';
     addVariantBtn.disabled = srcsetRows.children.length >= MAX_VARIANTS;
     updateSettingsSummary();
 }
 
-srcsetCheck.addEventListener('change', () => {
+function updateSrcsetEditorState() {
     srcsetEditor.classList.toggle('disabled', !srcsetCheck.checked);
     srcsetEditor.querySelectorAll('input, button').forEach((el) => { el.disabled = !srcsetCheck.checked; });
     if (srcsetCheck.checked) addVariantBtn.disabled = srcsetRows.children.length >= MAX_VARIANTS;
+}
+
+srcsetCheck.addEventListener('change', () => {
+    updateSrcsetEditorState();
     updateSettingsSummary();
+    scheduleSync();
 });
-webpCheck.addEventListener('change', onVariantsChanged);
+webpCheck.addEventListener('change', refreshVariantUI); // 미리보기의 확장자만 갱신 (저장 안 함)
 
 addVariantBtn.addEventListener('click', () => {
     if (srcsetRows.children.length >= MAX_VARIANTS) return;
@@ -203,7 +382,9 @@ function updateSettingsSummary() {
 }
 
 [webpCheck, optimizeCheck, adCheck, limitCheck].forEach((el) => el.addEventListener('change', updateSettingsSummary));
-renderVariantRows(loadVariants());
+
+// 시작 시: 이 기기에 저장된 마지막 설정을 먼저 적용 (로그인 후 서버 값으로 갱신)
+applySettings(loadCache().settings);
 
 // 로그인
 loginForm.addEventListener('submit', async (e) => {
@@ -225,6 +406,7 @@ logoutBtn.addEventListener('click', () => {
 function showMainApp() {
     loginContainer.style.display = 'none';
     mainContainer.style.display = 'flex';
+    pullSettings();
 }
 
 function showLoginScreen() {
@@ -342,31 +524,28 @@ async function processOneFile(file) {
         }
 
         const isAd = adCheck.checked;
+
+        // srcset 변형은 원본 업로드와 동시에 준비 (인코딩과 네트워크 전송을 겹쳐 시간 단축)
+        const variants = getActiveVariants();
+        const buildPromise = variants.length
+            ? buildVariants(original, processedFile, variants).catch((e) => {
+                console.error('[VARIANT_BUILD_ERROR]', e.message);
+                showError(`"${file.name}"의 srcset 사이즈 생성 실패: ${e.message}`);
+                return { made: [], skipped: [] };
+            })
+            : Promise.resolve({ made: [], skipped: [] });
+
         const result = await uploadFile(processedFile, { isAd });
         result.originalName = file.name;
         result.optimized = wasOptimized;
         result.converted = wasConverted;
 
-        // srcset 변형 생성 → 같은 기본 이름 + "-이름" 으로 업로드
-        const variants = getActiveVariants();
-        result.variants = [];
-        if (variants.length && result.baseName) {
-            const made = await buildVariants(original, processedFile, variants).catch((e) => {
-                console.error('[VARIANT_BUILD_ERROR]', e.message);
-                showError(`"${file.name}"의 srcset 사이즈 생성 실패: ${e.message}`);
-                return [];
-            });
-            for (const v of made) {
-                try {
-                    const r = await uploadFile(v.file, { isAd, baseName: result.baseName, variant: v.name });
-                    result.variants.push({ name: v.name, px: v.px, width: v.width, height: v.height, url: r.url, size: r.size });
-                } catch (variantError) {
-                    if (variantError.message.includes('401')) throw variantError;
-                    console.error('[VARIANT_UPLOAD_ERROR]', v.name, variantError.message);
-                    showError(`"${file.name}"의 -${v.name} 사이즈 업로드 실패: ${variantError.message}`);
-                }
-            }
-        }
+        // 변형 업로드: 같은 기본 이름 + "-이름" (최종 파일보다 작은 폭만, 동시에 여러 개)
+        const { made, skipped } = await buildPromise;
+        result.variantsSkipped = skipped;
+        result.variants = result.baseName && made.length
+            ? await uploadVariants(made, result.baseName, isAd, file.name)
+            : [];
 
         addResult(result);
 
@@ -469,40 +648,68 @@ async function processImage(file, { resize, format }) {
 }
 
 // srcset용 변형 파일 생성
-// - 원본에서 직접 축소 (화질 손실 최소화), 비율 유지, 긴 폭 = 설정 px
-// - 원본이 설정 px보다 작으면 원본 크기 그대로 생성
-// - 형식은 최종 업로드 파일과 동일
+// - 기준 폭 W = 최종 업로드 파일의 가로 폭 (최적화·WebP 변환이 끝난 결과)
+// - 변형 폭이 W보다 작을 때만 생성. 같거나 크면 원본이 대신하므로 건너뜀 (복제본 방지)
+// - 가로 폭을 설정 px와 정확히 맞추고 세로는 비율대로 (플러그인이 적는 NNNw 와 일치해야 함)
+// - 원본 사진에서 직접 축소해 화질 손실 최소화, 형식은 최종 파일과 동일
+// - 브라우저가 그 형식을 못 만들면(GIF, AVIF 등) 복사본으로 때우지 않고 건너뜀
 async function buildVariants(original, finalFile, variants) {
     const decoded = await decodeImage(original);
     const targetType = finalFile.type;
-    const out = [];
+    const finalWidth = finalFile.imageWidth || decoded.width;
+    const finalHeight = finalFile.imageHeight || decoded.height;
+    const made = [];
+    const skipped = [];
     try {
         for (const v of variants) {
-            const { width, height } = fitLongSide(decoded.width, decoded.height, v.px);
-            const sameAsOriginalSize = width === decoded.width && height === decoded.height;
-            let blob = null;
-
-            if (sameAsOriginalSize && original.type === targetType) {
-                // 축소할 필요도, 형식을 바꿀 필요도 없으면 원본을 그대로 복사 (재압축 없음)
-                blob = original;
-            } else {
-                blob = await encodeCanvas(decoded.source, width, height, targetType);
-                if (!blob) {
-                    // 브라우저가 이 형식(GIF, AVIF 등)을 만들 수 없음 → 최종 파일을 그대로 사용
-                    console.warn(`[VARIANT_ENCODE_UNSUPPORTED] ${targetType} 인코딩 불가, -${v.name}은(는) 최종 파일을 복사합니다`);
-                    blob = finalFile;
-                    const w = finalFile.imageWidth || decoded.width;
-                    const h = finalFile.imageHeight || decoded.height;
-                    out.push({ ...v, width: w, height: h, file: new File([blob], finalFile.name, { type: targetType }) });
-                    continue;
-                }
+            if (v.px >= finalWidth) { skipped.push(v.name); continue; }
+            const width = v.px;
+            const height = Math.max(1, Math.round(finalHeight * width / finalWidth));
+            const blob = await encodeCanvas(decoded.source, width, height, targetType);
+            if (!blob) {
+                console.warn(`[VARIANT_ENCODE_UNSUPPORTED] ${targetType} 인코딩 불가, -${v.name} 건너뜀`);
+                skipped.push(v.name);
+                continue;
             }
-            out.push({ ...v, width, height, file: new File([blob], finalFile.name, { type: targetType }) });
+            made.push({ ...v, width, height, file: new File([blob], finalFile.name, { type: targetType }) });
         }
     } finally {
         decoded.release();
     }
-    return out;
+    return { made, skipped };
+}
+
+// 변형 업로드 (동시에 최대 N개, 실패 시 1회 재시도, 인증 오류는 즉시 중단)
+const VARIANT_UPLOAD_CONCURRENCY = 3;
+
+async function uploadVariants(made, baseName, isAd, originalName) {
+    const results = new Array(made.length).fill(null);
+    let next = 0;
+    let authError = null;
+
+    const worker = async () => {
+        while (next < made.length && !authError) {
+            const i = next++;
+            const v = made[i];
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try {
+                    const r = await uploadFile(v.file, { isAd, baseName, variant: v.name });
+                    results[i] = { name: v.name, px: v.px, width: v.width, height: v.height, url: r.url, size: r.size };
+                    break;
+                } catch (e) {
+                    if (e.message.includes('401')) { authError = e; break; }
+                    if (attempt === 1) {
+                        console.error('[VARIANT_UPLOAD_ERROR]', v.name, e.message);
+                        showError(`"${originalName}"의 -${v.name} 사이즈 업로드 실패: ${e.message}`);
+                    }
+                }
+            }
+        }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(VARIANT_UPLOAD_CONCURRENCY, made.length) }, worker));
+    if (authError) throw authError;
+    return results.filter(Boolean);
 }
 
 function canvasToBlob(canvas, type, quality) {
@@ -624,6 +831,13 @@ function addResult(data) {
             });
             chips.appendChild(chip);
         });
+    }
+
+    if (data.variantsSkipped && data.variantsSkipped.length) {
+        const note = document.createElement('p');
+        note.className = 'variants-skipped';
+        note.textContent = `이미지 폭 이하라 생략한 사이즈: ${data.variantsSkipped.map((n) => '-' + n).join(', ')}`;
+        div.appendChild(note);
     }
 
     resultsList.insertBefore(div, resultsList.firstChild);
